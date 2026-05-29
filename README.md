@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.0.1-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-4.1.0-blue" alt="version" />
   <img src="https://img.shields.io/badge/python-3.9+-green" alt="python" />
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="license" />
 </p>
@@ -35,13 +35,13 @@
 
 | 功能 | 使用条件 | 说明 |
 |------|----------|------|
-| 💓 **心跳挂机涨亲密度** | 需要开播 | 移动端心跳，每 5 分钟 +6 亲密度，每日上限 30 |
+| 💓 **心跳挂机涨亲密度** | 需要开播 | X25Kn E/X 协议（HMAC 链式签名），看播自动涨亲密度 |
 | 🏅 **粉丝牌自动点亮** | 需要开播 | 发 10 条弹幕点亮牌子，保持 3 天可见 |
 | 🪙 **自动投币** | 无 | 给成员视频投币（1 币 = 10 亲密度），需用户明确开启 |
-| 👍 **视频自动点赞** | 无 | 每 2 天自动给成员新视频点赞 |
-| 💬 **动态自动点赞** | 无 | 每 2 天自动给成员新动态点赞 |
+| 👍 **视频自动点赞** | 无 | 自动给成员新视频点赞（默认每周执行，避免风控） |
+| 💬 **动态自动点赞** | 无 | 自动给成员新动态点赞（默认关闭，需手动开启） |
 
-> B站亲密度规则：观看直播每 5 分钟 +6，每日每成员上限 30（挂满 25 分钟即满额）；投币 1 币 = 10 亲密度。
+> B站亲密度规则：观看直播每分钟少量结算（具体数值由 B 站后端控制）；投币 1 币 = 10 亲密度。粉丝牌点亮（10 条弹幕）只维持牌子可见，不直接计入亲密度。
 
 ---
 
@@ -49,7 +49,8 @@
 
 | 版本 | 日期 | 更新内容 |
 |------|------|----------|
-| **v4** | 2026-04-01 | 心跳协议升级为 `mobileHeartBeat`，纯 Python 签名，零外部依赖，亲密度实测可涨 |
+| **v4.1** | 2026-05-28 | 心跳协议升级为 **X25Kn E/X**（HMAC 链式签名），替代已失效的 `mobileHeartBeat`；自动获取 LIVE_BUVID；GitHub Action 频率降低以减少风控 |
+| v4 | 2026-04-01 | （已废弃）`mobileHeartBeat` 协议——B 站后端已停止为该协议结算亲密度 |
 | v3 | 2026-03-23 | 新增开播检测 + 心跳挂机 + Discord 通知 |
 | v2 | 2026-03-20 | 粉丝牌点亮（10 条弹幕，3 天有效期） |
 | v1 | 2026-03 | 视频点赞 + 动态点赞 + GitHub Actions |
@@ -60,10 +61,11 @@
 
 | 项目 | 说明 |
 |------|------|
-| **心跳协议** | B站移动端 `mobileHeartBeat`（v4.0 升级，旧版 `x25Kn` 已失效） |
-| **签名算法** | `sha512 → sha3_512 → sha384 → sha3_384 → blake2b` 链式 hash |
-| **实现语言** | 纯 Python 3.9+，标准库 `hashlib` |
-| **外部依赖** | 无（不需要 Node.js / pm2 / Docker） |
+| **心跳协议** | B 站 Web `X25Kn`（`/x25Kn/E` 进入 → `/x25Kn/X` 心跳，每次响应递推 `secret_key/secret_rule/timestamp`） |
+| **签名算法** | HMAC 链式签名（rule 索引 0~5 → HMAC-MD5 / SHA1 / SHA256 / SHA224 / SHA512 / SHA384），`secret_key` 作 HMAC key |
+| **设备指纹** | 自动从 `api.bilibili.com/x/frontend/finger/spi` 获取 `b_3` 当 `LIVE_BUVID`，缓存到 `.cookies.json` |
+| **实现语言** | 纯 Python 3.9+，标准库 `hashlib` + `hmac` |
+| **外部依赖** | 无（不需要 Node.js / pm2 / Docker / wasm 服务） |
 | **运行方式** | 命令行直接执行 或 任意 agent 框架调度 |
 
 ## 🔒 安全说明
@@ -168,7 +170,9 @@ python3 scripts/checkin.py --live-only
 3. **Actions** 标签 → 点击 **I understand my workflows, go ahead and enable them**
 4. 验证：**Actions** → **A-SOUL 自动应援** → **Run workflow**
 
-之后每 2 天自动执行。动态点赞需编辑 `daily.yml` 将 `ENABLE_DYNAMIC_LIKE` 改为 `'true'`。
+之后每周自动执行（默认周一、周四，可在 `daily.yml` 调整）。动态点赞需编辑 `daily.yml` 将 `ENABLE_DYNAMIC_LIKE` 改为 `'true'`。
+
+> ⚠️ 频率别调太高：B 站会对跨地区高频自动化触发风控、频繁刷新你的 Cookie。每周 1~2 次是相对安全的节奏。如果你的 Cookie 经常一两天就失效，建议用一个不在浏览器/手机日常登录的小号专门做自动化。
 
 </details>
 

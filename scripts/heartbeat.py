@@ -242,80 +242,179 @@ def enter_room(room_id: int, sessdata: str, bili_jct: str) -> bool:
 
 
 # ──────────────────────────────────────────
-# Mobile Heartbeat (涨亲密度，新协议)
+# X25Kn Heartbeat (涨亲密度，2026 现行 Web 协议)
+# 协议：先 E（Enter）拿到 secret_key/secret_rule，之后每 60s 一次 X，
+# 每个 X 用上一次响应里的 secret_key 做 HMAC 链式签名。
+# 参考：RayWangQvQ/BiliBiliToolPro LiveDomainService.cs
 # ──────────────────────────────────────────
+
+_X25KN_E_URL = "https://live-trace.bilibili.com/xlive/data-interface/v1/x25Kn/E"
+_X25KN_X_URL = "https://live-trace.bilibili.com/xlive/data-interface/v1/x25Kn/X"
+_X25KN_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+# HMAC 哈希函数表（rule index → hashlib name）
+_X25KN_HMAC_FUNCS = ["md5", "sha1", "sha256", "sha224", "sha512", "sha384"]
+
 
 def _random_string(length: int) -> str:
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
 
 
-def _mobile_client_sign(data: dict) -> str:
-    """移动端心跳签名：sha512 → sha3_512 → sha384 → sha3_384 → blake2b 链式 hash"""
-    _str = json.dumps(data, separators=(",", ":"))
-    for n in ["sha512", "sha3_512", "sha384", "sha3_384", "blake2b"]:
-        _str = hashlib.new(n, _str.encode("utf-8")).hexdigest()
-    return _str
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
-def mobile_heartbeat(room_id: int, up_id: int, area_id: int, parent_area_id: int,
-                     seq: int, sessdata: str, bili_jct: str) -> Optional[Dict]:
-    """发送移动端心跳，返回 {heartbeat_interval, ...} 或 None"""
-    url = "https://live-trace.bilibili.com/xlive/data-interface/v1/heartbeat/mobileHeartBeat"
-    data = {
-        "platform": "android",
-        "uuid": _random_string(32),
-        "buvid": _random_string(37).upper(),
-        "seq_id": str(seq),
-        "room_id": str(room_id),
-        "parent_id": str(parent_area_id),
-        "area_id": str(area_id),
-        "timestamp": str(int(time.time()) - 60),
-        "secret_key": "axoaadsffcazxksectbbb",
-        "watch_time": "60",
-        "up_id": str(up_id),
-        "up_level": "40",
-        "jump_from": "30000",
-        "gu_id": _random_string(43),
-        "play_type": "0",
-        "play_url": "",
-        "s_time": "0",
-        "data_behavior_id": "",
-        "data_source_id": "",
-        "up_session": f"l:one:live:record:{room_id}:{int(time.time()) - 88888}",
-        "visit_id": _random_string(32),
-        "watch_status": "%7B%22pk_id%22%3A0%2C%22screen_status%22%3A1%7D",
-        "click_id": _random_string(32),
-        "session_id": "",
-        "player_type": "0",
-        "client_ts": str(int(time.time())),
-    }
-    data["client_sign"] = _mobile_client_sign(data)
-    data["csrf_token"] = bili_jct
-    data["csrf"] = bili_jct
+def _x25kn_sign(payload_json: str, rules: List[int], secret_key: str) -> str:
+    """按 secret_rule 用 secret_key 做 HMAC 链式签名"""
+    import hmac
+    result = payload_json
+    key_bytes = secret_key.encode("utf-8")
+    for r in rules:
+        if 0 <= r < len(_X25KN_HMAC_FUNCS):
+            mac = hmac.new(key_bytes, result.encode("utf-8"),
+                           getattr(hashlib, _X25KN_HMAC_FUNCS[r]))
+            result = mac.hexdigest()
+    return result
 
+
+def _fetch_live_buvid(sessdata: str, bili_jct: str) -> Optional[str]:
+    """走 SPI 接口拿 B 站签发的 buvid（b_3），可直接当 LIVE_BUVID 用"""
+    url = "https://api.bilibili.com/x/frontend/finger/spi"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": _X25KN_UA,
+        "Cookie": f"SESSDATA={sessdata}; bili_jct={bili_jct}",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        if body.get("code") == 0 and body.get("data", {}).get("b_3"):
+            return body["data"]["b_3"]
+    except Exception as e:
+        print(f"    ⚠️  获取 LIVE_BUVID 失败: {e}", file=sys.stderr)
+    return None
+
+
+def _ensure_live_buvid(sessdata: str, bili_jct: str, cookies_path: Optional[Path] = None) -> Optional[str]:
+    """从 cookies.json 读 LIVE_BUVID；没有就抓一次并写回"""
+    cookies_path = cookies_path or _COOKIE_PATHS[0]
+    if cookies_path.exists():
+        try:
+            data = json.load(open(cookies_path))
+            if data.get("LIVE_BUVID"):
+                return data["LIVE_BUVID"]
+        except Exception:
+            data = {}
+    else:
+        data = {"SESSDATA": sessdata, "bili_jct": bili_jct}
+
+    buvid = _fetch_live_buvid(sessdata, bili_jct)
+    if not buvid:
+        return None
+    try:
+        data["LIVE_BUVID"] = buvid
+        with open(cookies_path, "w") as f:
+            json.dump(data, f)
+        os.chmod(cookies_path, 0o600)
+        print(f"    💾 已缓存 LIVE_BUVID 到 {cookies_path}", file=sys.stderr)
+    except Exception:
+        pass
+    return buvid
+
+
+def _x25kn_post(url: str, form: dict, sessdata: str, bili_jct: str,
+                referer: str) -> Optional[Dict]:
+    body = urllib.parse.urlencode(form).encode("utf-8")
     headers = {
-        "User-Agent": "Mozilla/5.0 BiliDroid/6.73.1 (bbcallen@gmail.com) os/android model/Mi 10 Pro mobi_app/android build/6731100 channel/xiaomi innerVer/6731110 osVer/12 network/2",
+        "User-Agent": _X25KN_UA,
         "Content-Type": "application/x-www-form-urlencoded",
         "Cookie": f"SESSDATA={sessdata}; bili_jct={bili_jct}",
+        "Origin": "https://live.bilibili.com",
+        "Referer": referer,
     }
-    form = urllib.parse.urlencode(data).encode("utf-8")
-    req = urllib.request.Request(url, data=form, headers=headers)
+    req = urllib.request.Request(url, data=body, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-        if body.get("code") == 0 and body.get("data"):
-            return body["data"]
-        else:
-            error_code = body.get("code", "unknown")
-            error_msg = body.get("message", str(body))
-            print(f"    ⚠️  心跳失败: [{error_code}] {error_msg}", file=sys.stderr)
-            _log({"type": "heartbeat_error", "room_id": room_id, "up_id": up_id,
-                  "code": error_code, "message": error_msg})
+            return json.loads(resp.read().decode("utf-8"))
     except Exception as e:
-        print(f"    ⚠️  心跳异常: {e}", file=sys.stderr)
-        _log({"type": "heartbeat_exception", "room_id": room_id, "up_id": up_id,
-              "error": str(e)})
+        return {"code": -1, "message": str(e)}
+
+
+def x25kn_enter_room(room_id: int, parent_id: int, area_id: int, up_id: int,
+                     buvid: str, uuid_str: str,
+                     sessdata: str, bili_jct: str) -> Optional[Dict]:
+    """E：进入房间，返回 {timestamp, secret_key, secret_rule, heartbeat_interval} 或 None"""
+    ts = _now_ms()
+    form = {
+        "id": json.dumps([parent_id, area_id, 0, room_id], separators=(",", ":")),
+        "device": json.dumps([buvid, uuid_str], separators=(",", ":")),
+        "ts": ts,
+        "is_patch": 0,
+        "heart_beat": "[]",
+        "ua": _X25KN_UA,
+        "csrf_token": bili_jct,
+        "csrf": bili_jct,
+        "visit_id": "",
+        "ruid": up_id,
+    }
+    resp = _x25kn_post(_X25KN_E_URL, form, sessdata, bili_jct,
+                       f"https://live.bilibili.com/{room_id}")
+    if resp and resp.get("code") == 0 and resp.get("data"):
+        return resp["data"]
+    code = (resp or {}).get("code", "?")
+    msg = (resp or {}).get("message", str(resp))
+    print(f"    ⚠️  E 心跳失败: [{code}] {msg}", file=sys.stderr)
+    _log({"type": "x25kn_e_error", "room_id": room_id, "code": code, "message": msg})
     return None
+
+
+def x25kn_heartbeat(room_id: int, parent_id: int, area_id: int, seq: int,
+                    buvid: str, uuid_str: str,
+                    ets: int, secret_key: str, secret_rule: List[int],
+                    sessdata: str, bili_jct: str) -> Optional[Dict]:
+    """X：心跳，返回 {timestamp, secret_key, secret_rule, heartbeat_interval} 或 None"""
+    ts = _now_ms()
+    sign_payload = {
+        "platform": "web",
+        "parent_id": parent_id,
+        "area_id": area_id,
+        "seq_id": seq,
+        "room_id": room_id,
+        "buvid": buvid,
+        "uuid": uuid_str,
+        "ets": ets,
+        "time": 60,
+        "ts": ts,
+    }
+    sign_input = json.dumps(sign_payload, separators=(",", ":"))
+    s = _x25kn_sign(sign_input, secret_rule, secret_key)
+
+    form = {
+        "s": s,
+        "id": json.dumps([parent_id, area_id, seq, room_id], separators=(",", ":")),
+        "device": json.dumps([buvid, uuid_str], separators=(",", ":")),
+        "ets": ets,
+        "benchmark": secret_key,
+        "time": 60,
+        "ts": ts,
+        "ua": _X25KN_UA,
+        "csrf_token": bili_jct,
+        "csrf": bili_jct,
+        "visit_id": "",
+    }
+    resp = _x25kn_post(_X25KN_X_URL, form, sessdata, bili_jct,
+                       f"https://live.bilibili.com/{room_id}")
+    if resp and resp.get("code") == 0 and resp.get("data"):
+        return resp["data"]
+    code = (resp or {}).get("code", "?")
+    msg = (resp or {}).get("message", str(resp))
+    print(f"    ⚠️  X 心跳失败: [{code}] {msg}", file=sys.stderr)
+    _log({"type": "x25kn_x_error", "room_id": room_id, "seq": seq,
+          "code": code, "message": msg})
+    return None
+
 
 
 # ──────────────────────────────────────────
@@ -378,7 +477,7 @@ def get_my_medals(sessdata: str, bili_jct: str) -> Dict[int, Dict]:
 def watch_room(member: Dict, sessdata: str, bili_jct: str,
                duration_min: int = WATCH_MINUTES, interval: int = HEARTBEAT_INTERVAL,
                until_offline: bool = False, title: str = "") -> Dict:
-    """对一个直播间进行心跳挂机。until_offline=True 时持续到下播为止。"""
+    """对一个直播间进行 X25Kn 心跳挂机。until_offline=True 时持续到下播为止。"""
     room_id = member["room"]
     up_id = member["uid"]
     name = member["name"]
@@ -393,8 +492,40 @@ def watch_room(member: Dict, sessdata: str, bili_jct: str,
     area_id = room_info.get("area_id", 0) if room_info else 0
     parent_area_id = room_info.get("parent_area_id", 0) if room_info else 0
 
-    # 使用移动端心跳（可涨亲密度）
-    print(f"    📱 移动端心跳已就绪（间隔 {interval}s，每5分钟+6亲密度，上限30/天）", file=sys.stderr)
+    # 准备 X25Kn 协议所需的 LIVE_BUVID
+    buvid = _ensure_live_buvid(sessdata, bili_jct)
+    if not buvid:
+        print(f"    ⚠️  无法获取 LIVE_BUVID，亲密度可能无法结算", file=sys.stderr)
+        buvid = _random_string(37).upper()  # fallback
+    uuid_str = str(uuid.uuid4())
+
+    # E：进入房间，拿到首份 secret_key/secret_rule
+    e_data = x25kn_enter_room(room_id, parent_area_id, area_id, up_id,
+                              buvid, uuid_str, sessdata, bili_jct)
+    if not e_data:
+        return {"name": name, "room": room_id, "success": False, "error": "X25Kn E 失败",
+                "beats_ok": 0, "beats_total": 0, "minutes": 0}
+    secret_key = e_data["secret_key"]
+    secret_rule = e_data["secret_rule"]
+    ets = e_data["timestamp"]
+    print(f"    📡 X25Kn E 已通过，rule={secret_rule}", file=sys.stderr)
+
+    def _do_x_beat(seq: int):
+        """发一次 X 心跳，更新闭包里的 secret_key/secret_rule/ets"""
+        nonlocal secret_key, secret_rule, ets
+        result = x25kn_heartbeat(room_id, parent_area_id, area_id, seq,
+                                 buvid, uuid_str, ets, secret_key, secret_rule,
+                                 sessdata, bili_jct)
+        if result:
+            secret_key = result.get("secret_key", secret_key)
+            secret_rule = result.get("secret_rule", secret_rule)
+            ets = result.get("timestamp", ets)
+        return result
+
+    print(f"    📱 X25Kn 心跳已就绪（间隔 {interval}s，看播涨亲密度）", file=sys.stderr)
+    # X 心跳要求 ts - ets ≈ time(=60s)，所以首次 X 必须等 interval 秒后再发
+    print(f"    ⏳ 等待首个心跳窗口 ({interval}s)...", file=sys.stderr)
+    time.sleep(interval)
 
     if until_offline:
         title_str = f"「{title}」" if title else ""
@@ -409,19 +540,16 @@ def watch_room(member: Dict, sessdata: str, bili_jct: str,
         start_time = time.time()
         while True:
             beat_num += 1
-            result = mobile_heartbeat(room_id, up_id, area_id, parent_area_id,
-                                      beat_num, sessdata, bili_jct)
+            result = _do_x_beat(beat_num)
             if result:
                 beats_ok += 1
                 consecutive_fail = 0
-                # 不再使用服务器返回的 heartbeat_interval，保持用户设置的间隔
-                # 服务器返回的 300 秒是亲密度结算周期，不是心跳发送间隔
             else:
                 consecutive_fail += 1
 
             elapsed_min = int((time.time() - start_time) / 60)
             if beat_num % 5 == 0:
-                print(f"    💓 心跳 {beat_num}(移动端)  已挂 {elapsed_min} 分钟  ok:{beats_ok}", file=sys.stderr)
+                print(f"    💓 心跳 {beat_num}(X25Kn)  已挂 {elapsed_min} 分钟  ok:{beats_ok}", file=sys.stderr)
             time.sleep(interval)
             status = _get_single_room_status(room_id, sessdata, bili_jct)
             if status and status.get("live_status") != 1:
@@ -436,7 +564,7 @@ def watch_room(member: Dict, sessdata: str, bili_jct: str,
                     "success": beats_ok > 0,
                     "beats_ok": beats_ok, "beats_total": beat_num,
                     "minutes": elapsed_min, "stopped_reason": "offline",
-                    "mobile_heartbeat": True,
+                    "x25kn": True,
                 }
             if consecutive_fail >= 10:
                 elapsed_min = int((time.time() - start_time) / 60)
@@ -445,7 +573,7 @@ def watch_room(member: Dict, sessdata: str, bili_jct: str,
                     "name": name, "room": room_id, "success": beats_ok > 0,
                     "beats_ok": beats_ok, "beats_total": beat_num,
                     "minutes": elapsed_min, "stopped_reason": "error",
-                    "mobile_heartbeat": True,
+                    "x25kn": True,
                 }
     else:
         total_beats = (duration_min * 60) // interval
@@ -453,13 +581,12 @@ def watch_room(member: Dict, sessdata: str, bili_jct: str,
               file=sys.stderr)
         beats_ok = 0
         for i in range(total_beats):
-            result = mobile_heartbeat(room_id, up_id, area_id, parent_area_id,
-                                      i + 1, sessdata, bili_jct)
+            result = _do_x_beat(i + 1)
             if result:
                 beats_ok += 1
             elapsed_min = ((i + 1) * interval) // 60
             if (i + 1) % 5 == 0 or i == total_beats - 1:
-                print(f"    💓 心跳 {i+1}/{total_beats}(移动端)  已挂 {elapsed_min} 分钟", file=sys.stderr)
+                print(f"    💓 心跳 {i+1}/{total_beats}(X25Kn)  已挂 {elapsed_min} 分钟", file=sys.stderr)
             if i < total_beats - 1:
                 time.sleep(interval)
 
@@ -468,7 +595,7 @@ def watch_room(member: Dict, sessdata: str, bili_jct: str,
             "name": name, "room": room_id,
             "success": beats_ok > 0,
             "beats_ok": beats_ok, "beats_total": total_beats,
-            "minutes": actual_minutes, "mobile_heartbeat": True,
+            "minutes": actual_minutes, "x25kn": True,
         }
 
 
@@ -485,7 +612,7 @@ def format_output(live_results: List[Dict], offline_members: List[str],
             intimacy_str = ""
             if medal:
                 intimacy_str = f"  今日亲密度:{medal['today_intimacy']}"
-            mode_str = "移动端" if r.get("mobile_heartbeat") else "旧版"
+            mode_str = "X25Kn" if r.get("x25kn") else "旧版"
 
             if r["success"]:
                 lines.append(
