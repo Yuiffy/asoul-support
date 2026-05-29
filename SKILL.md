@@ -76,14 +76,34 @@ python3 {baseDir}/scripts/dynamics.py --days 7 --members 嘉然,贝拉
 
 ## 推荐 OpenClaw 定时任务
 
+### 简单定时任务（推荐用于轻量使用）
+
 ```
 每 30 分钟检测一次开播，开播了就自动弹幕点亮+挂机涨亲密度：
-openclaw cron add --name "A-SOUL开播挂机" --cron "*/30 * * * *" \
-  --message "帮我检测A-SOUL成员是否在直播，在播的话先挂机涨亲密度，再发弹幕点亮牌子" \
+openclaw cron add --name "A-SOUL开播挂机" --cron "*/30 * * * *" \\
+  --message "帮我检测A-SOUL成员是否在直播，在播的话先挂机涨亲密度，再发弹幕点亮牌子" \\
   --timeout-seconds 21600
+```
+
+### 高级进程管理定时任务（推荐用于长期稳定运行）
+
+对于需要进程锁定、自动重启和更稳定通知的场景，使用专门的进程管理脚本：
+
+```
+每 5 分钟运行一次进程管理：
+openclaw cron add --name "A-SOUL进程管理" --cron "*/5 * * * *" \\
+  --message "cd /path/to/asoul-support && python3 manage_asoul_heartbeat.py" \\
+  --timeout-seconds 300
+```
+
+**优势：**
+- 进程锁定防止重复启动
+- 自动检测已死进程并清理锁文件
+- 仅在真正开播/下播时发送 Discord 通知
+- 详细日志记录到 logs/ 目录
+- 自动处理成员状态变化
 
 视频和动态由 GitHub Actions 自动处理（每 2 天），无需额外配置。
-```
 
 ## Cookie 设置
 
