@@ -2,3 +2,12 @@
 __pycache__/
 *.pyc
 pcheartbeat/
+
+# 运行时状态 / 日志
+.live_state.json
+logs/
+*.log
+
+# 个人内容 / 系统垃圾
+text2speech.md
+.DS_Store
