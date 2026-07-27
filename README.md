@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-4.1.0-blue" alt="version" />
+  <img src="https://img.shields.io/badge/version-4.1.1-blue" alt="version" />
   <img src="https://img.shields.io/badge/python-3.9+-green" alt="python" />
   <img src="https://img.shields.io/badge/license-MIT-orange" alt="license" />
 </p>
@@ -35,7 +35,7 @@
 
 | 功能 | 使用条件 | 说明 |
 |------|----------|------|
-| 💓 **心跳挂机涨亲密度** | 需要开播 | X25Kn E/X 协议（HMAC 链式签名），看播自动涨亲密度 |
+| 💓 **心跳挂机涨亲密度** | 需要开播 | X25Kn E/X 协议；结束后记录亲密度前后值和实际增量 |
 | 🏅 **粉丝牌自动点亮** | 需要开播 | 发 10 条弹幕点亮牌子，保持 3 天可见 |
 | 🪙 **自动投币** | 无 | 给成员视频投币（1 币 = 10 亲密度），需用户明确开启 |
 | 👍 **视频自动点赞** | 无 | 自动给成员新视频点赞（默认每周执行，避免风控） |
@@ -49,6 +49,7 @@
 
 | 版本 | 日期 | 更新内容 |
 |------|------|----------|
+| **v4.1.1** | 2026-07-27 | 修复 X25Kn 心跳时间漂移和失败链恢复；新增亲密度增量记录与登录预检；GitHub Actions 升级到 Node 24 运行时 |
 | **v4.1** | 2026-05-28 | 心跳协议升级为 **X25Kn E/X**（HMAC 链式签名），替代已失效的 `mobileHeartBeat`；自动获取 LIVE_BUVID；GitHub Action 频率降低以减少风控 |
 | v4 | 2026-04-01 | （已废弃）`mobileHeartBeat` 协议——B 站后端已停止为该协议结算亲密度 |
 | v3 | 2026-03-23 | 新增开播检测 + 心跳挂机 + Discord 通知 |
@@ -63,7 +64,7 @@
 |------|------|
 | **心跳协议** | B 站 Web `X25Kn`（`/x25Kn/E` 进入 → `/x25Kn/X` 心跳，每次响应递推 `secret_key/secret_rule/timestamp`） |
 | **签名算法** | HMAC 链式签名（rule 索引 0~5 → HMAC-MD5 / SHA1 / SHA256 / SHA224 / SHA512 / SHA384），`secret_key` 作 HMAC key |
-| **设备指纹** | 自动从 `api.bilibili.com/x/frontend/finger/spi` 获取 `b_3` 当 `LIVE_BUVID`，缓存到 `.cookies.json` |
+| **设备指纹** | 优先使用 `.cookies.json` 中的浏览器 `LIVE_BUVID`；缺失时以 SPI `b_3` 作为兼容回退 |
 | **实现语言** | 纯 Python 3.9+，标准库 `hashlib` + `hmac` |
 | **外部依赖** | 无（不需要 Node.js / pm2 / Docker / wasm 服务） |
 | **运行方式** | 命令行直接执行 或 任意 agent 框架调度 |

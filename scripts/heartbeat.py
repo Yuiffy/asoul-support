@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 A-SOUL 直播心跳挂机 — 检测成员开播 → 移动端心跳涨亲密度。
-使用 mobileHeartBeat 协议（纯 Python 签名，无需外部服务）。
-每 5 分钟 +6 亲密度，每日上限 30。
+使用 X25Kn E/X 协议（纯 Python HMAC 签名，无需外部服务）。
+严格遵循服务端下发的心跳间隔，避免 time check failed。
 需要成员正在直播才有效。
 """
 
@@ -20,6 +20,8 @@ import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Optional, Dict, List
+
+from check_auth import check_login
 
 _DISCORD_TARGET = "user:1479415368249507881"
 
@@ -267,6 +269,15 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _wait_for_heartbeat_window(last_response_at: float, interval: int) -> float:
+    """Wait only for the unspent part of the server heartbeat interval."""
+    wait_seconds = interval - (time.monotonic() - last_response_at)
+    if wait_seconds > 0:
+        time.sleep(wait_seconds)
+        return wait_seconds
+    return 0.0
+
+
 def _x25kn_sign(payload_json: str, rules: List[int], secret_key: str) -> str:
     """按 secret_rule 用 secret_key 做 HMAC 链式签名"""
     import hmac
@@ -370,9 +381,11 @@ def x25kn_enter_room(room_id: int, parent_id: int, area_id: int, up_id: int,
     return None
 
 
-def x25kn_heartbeat(room_id: int, parent_id: int, area_id: int, seq: int,
+def x25kn_heartbeat(room_id: int, parent_id: int, area_id: int, up_id: int,
+                    seq: int,
                     buvid: str, uuid_str: str,
                     ets: int, secret_key: str, secret_rule: List[int],
+                    heartbeat_interval: int,
                     sessdata: str, bili_jct: str) -> Optional[Dict]:
     """X：心跳，返回 {timestamp, secret_key, secret_rule, heartbeat_interval} 或 None"""
     ts = _now_ms()
@@ -385,7 +398,7 @@ def x25kn_heartbeat(room_id: int, parent_id: int, area_id: int, seq: int,
         "buvid": buvid,
         "uuid": uuid_str,
         "ets": ets,
-        "time": 60,
+        "time": heartbeat_interval,
         "ts": ts,
     }
     sign_input = json.dumps(sign_payload, separators=(",", ":"))
@@ -395,9 +408,10 @@ def x25kn_heartbeat(room_id: int, parent_id: int, area_id: int, seq: int,
         "s": s,
         "id": json.dumps([parent_id, area_id, seq, room_id], separators=(",", ":")),
         "device": json.dumps([buvid, uuid_str], separators=(",", ":")),
+        "ruid": up_id,
         "ets": ets,
         "benchmark": secret_key,
-        "time": 60,
+        "time": heartbeat_interval,
         "ts": ts,
         "ua": _X25KN_UA,
         "csrf_token": bili_jct,
@@ -508,24 +522,74 @@ def watch_room(member: Dict, sessdata: str, bili_jct: str,
     secret_key = e_data["secret_key"]
     secret_rule = e_data["secret_rule"]
     ets = e_data["timestamp"]
+    heartbeat_interval = int(e_data.get("heartbeat_interval") or interval)
+    if heartbeat_interval < 5 or heartbeat_interval > 300:
+        heartbeat_interval = HEARTBEAT_INTERVAL
+    protocol_seq = 0
+    last_response_at = time.monotonic()
     print(f"    📡 X25Kn E 已通过，rule={secret_rule}", file=sys.stderr)
 
-    def _do_x_beat(seq: int):
-        """发一次 X 心跳，更新闭包里的 secret_key/secret_rule/ets"""
+    def _restart_chain() -> bool:
+        """X 失败后重新发送 E，避免用过期时间戳连续失败。"""
         nonlocal secret_key, secret_rule, ets
-        result = x25kn_heartbeat(room_id, parent_area_id, area_id, seq,
-                                 buvid, uuid_str, ets, secret_key, secret_rule,
-                                 sessdata, bili_jct)
+        nonlocal heartbeat_interval, protocol_seq, last_response_at
+        restarted = x25kn_enter_room(
+            room_id, parent_area_id, area_id, up_id,
+            buvid, uuid_str, sessdata, bili_jct,
+        )
+        last_response_at = time.monotonic()
+        if not restarted:
+            return False
+        secret_key = restarted["secret_key"]
+        secret_rule = restarted["secret_rule"]
+        ets = restarted["timestamp"]
+        heartbeat_interval = int(
+            restarted.get("heartbeat_interval") or HEARTBEAT_INTERVAL
+        )
+        if heartbeat_interval < 5 or heartbeat_interval > 300:
+            heartbeat_interval = HEARTBEAT_INTERVAL
+        protocol_seq = 0
+        print("    🔄 已重建 X25Kn 心跳链", file=sys.stderr)
+        return True
+
+    def _do_x_beat():
+        """按服务端时间窗口发一次 X，并递推下一轮协议状态。"""
+        nonlocal secret_key, secret_rule, ets
+        nonlocal heartbeat_interval, protocol_seq, last_response_at
+
+        _wait_for_heartbeat_window(last_response_at, heartbeat_interval)
+
+        next_seq = protocol_seq + 1
+        result = x25kn_heartbeat(
+            room_id, parent_area_id, area_id, up_id, next_seq,
+            buvid, uuid_str, ets, secret_key, secret_rule,
+            heartbeat_interval, sessdata, bili_jct,
+        )
+        last_response_at = time.monotonic()
         if result:
+            protocol_seq = next_seq
             secret_key = result.get("secret_key", secret_key)
             secret_rule = result.get("secret_rule", secret_rule)
             ets = result.get("timestamp", ets)
+            next_interval = int(
+                result.get("heartbeat_interval") or heartbeat_interval
+            )
+            if 5 <= next_interval <= 300:
+                heartbeat_interval = next_interval
+            _log({
+                "type": "x25kn_x_success",
+                "room_id": room_id,
+                "seq": protocol_seq,
+                "interval": heartbeat_interval,
+            })
+        else:
+            _restart_chain()
         return result
 
-    print(f"    📱 X25Kn 心跳已就绪（间隔 {interval}s，看播涨亲密度）", file=sys.stderr)
-    # X 心跳要求 ts - ets ≈ time(=60s)，所以首次 X 必须等 interval 秒后再发
-    print(f"    ⏳ 等待首个心跳窗口 ({interval}s)...", file=sys.stderr)
-    time.sleep(interval)
+    print(
+        f"    📱 X25Kn 心跳已就绪（服务端间隔 {heartbeat_interval}s，看播涨亲密度）",
+        file=sys.stderr,
+    )
 
     if until_offline:
         title_str = f"「{title}」" if title else ""
@@ -540,7 +604,7 @@ def watch_room(member: Dict, sessdata: str, bili_jct: str,
         start_time = time.time()
         while True:
             beat_num += 1
-            result = _do_x_beat(beat_num)
+            result = _do_x_beat()
             if result:
                 beats_ok += 1
                 consecutive_fail = 0
@@ -550,7 +614,6 @@ def watch_room(member: Dict, sessdata: str, bili_jct: str,
             elapsed_min = int((time.time() - start_time) / 60)
             if beat_num % 5 == 0:
                 print(f"    💓 心跳 {beat_num}(X25Kn)  已挂 {elapsed_min} 分钟  ok:{beats_ok}", file=sys.stderr)
-            time.sleep(interval)
             status = _get_single_room_status(room_id, sessdata, bili_jct)
             if status and status.get("live_status") != 1:
                 elapsed_min = int((time.time() - start_time) / 60)
@@ -576,21 +639,19 @@ def watch_room(member: Dict, sessdata: str, bili_jct: str,
                     "x25kn": True,
                 }
     else:
-        total_beats = (duration_min * 60) // interval
-        print(f"    ⏱  开始挂机 {duration_min} 分钟（每 {interval}s 心跳一次，共 {total_beats} 次）...",
+        total_beats = (duration_min * 60) // heartbeat_interval
+        print(f"    ⏱  开始挂机 {duration_min} 分钟（每 {heartbeat_interval}s 心跳一次，共 {total_beats} 次）...",
               file=sys.stderr)
         beats_ok = 0
         for i in range(total_beats):
-            result = _do_x_beat(i + 1)
+            result = _do_x_beat()
             if result:
                 beats_ok += 1
-            elapsed_min = ((i + 1) * interval) // 60
+            elapsed_min = ((i + 1) * heartbeat_interval) // 60
             if (i + 1) % 5 == 0 or i == total_beats - 1:
                 print(f"    💓 心跳 {i+1}/{total_beats}(X25Kn)  已挂 {elapsed_min} 分钟", file=sys.stderr)
-            if i < total_beats - 1:
-                time.sleep(interval)
 
-        actual_minutes = (total_beats * interval) // 60
+        actual_minutes = (total_beats * heartbeat_interval) // 60
         return {
             "name": name, "room": room_id,
             "success": beats_ok > 0,
@@ -615,9 +676,12 @@ def format_output(live_results: List[Dict], offline_members: List[str],
             mode_str = "X25Kn" if r.get("x25kn") else "旧版"
 
             if r["success"]:
+                delta = r.get("intimacy_delta")
+                delta_str = f"  亲密度:+{delta}" if isinstance(delta, int) else ""
                 lines.append(
                     f"    ✅ {r['name']}{medal_str}  — 挂机 {r['minutes']}min"
-                    f"  💓{r['beats_ok']}/{r['beats_total']}({mode_str}){intimacy_str}"
+                    f"  💓{r['beats_ok']}/{r['beats_total']}({mode_str})"
+                    f"{intimacy_str}{delta_str}"
                 )
             else:
                 lines.append(f"    ❌ {r['name']}  — {r.get('error', '心跳失败')}")
@@ -729,6 +793,15 @@ def main():
         print("\nℹ️  当前没有成员在播，本次跳过")
         return
 
+    login_valid, login_message = check_login(sessdata, bili_jct)
+    if not login_valid:
+        print(
+            f"\n❌ B 站登录态无效（{login_message}），本次不启动挂机。",
+            file=sys.stderr,
+        )
+        _log({"type": "auth_error", "message": login_message})
+        sys.exit(1)
+
     print("  🏅 正在获取粉丝牌信息...", file=sys.stderr)
     medals = get_my_medals(sessdata, bili_jct)
 
@@ -774,15 +847,46 @@ def main():
             lock_file.write_text(str(os.getpid()))
         _log({"type": "watch_start", "member": m["name"], "room": m["room"]})
         live_title = statuses.get(m["room"], {}).get("title", "")
+        result = {
+            "name": m["name"],
+            "room": m["room"],
+            "success": False,
+            "error": "挂机进程异常退出",
+            "beats_ok": 0,
+            "beats_total": 0,
+            "minutes": 0,
+        }
         try:
             result = watch_room(m, sessdata, bili_jct,
                                 duration_min=args.duration, interval=args.interval,
                                 until_offline=args.until_offline, title=live_title)
+        except Exception as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+            print(f"    ❌ 挂机异常: {result['error']}", file=sys.stderr)
+            _log({
+                "type": "watch_exception",
+                "member": m["name"],
+                "room": m["room"],
+                "error": result["error"],
+            })
         finally:
             if lock_file and lock_file.exists():
                 lock_file.unlink()
+
+        before_intimacy = medals.get(m["uid"], {}).get("today_intimacy")
+        refreshed_medals = get_my_medals(sessdata, bili_jct)
+        after_intimacy = refreshed_medals.get(m["uid"], {}).get("today_intimacy")
+        if before_intimacy is not None and after_intimacy is not None:
+            result["intimacy_before"] = before_intimacy
+            result["intimacy_after"] = after_intimacy
+            result["intimacy_delta"] = after_intimacy - before_intimacy
+            medals[m["uid"]] = refreshed_medals[m["uid"]]
+
         _log({"type": "watch_end", "member": m["name"], "room": m["room"],
-              "minutes": result.get("minutes", 0), "beats_ok": result.get("beats_ok", 0)})
+              "minutes": result.get("minutes", 0), "beats_ok": result.get("beats_ok", 0),
+              "intimacy_before": result.get("intimacy_before"),
+              "intimacy_after": result.get("intimacy_after"),
+              "intimacy_delta": result.get("intimacy_delta")})
 
         live_results.append(result)
 

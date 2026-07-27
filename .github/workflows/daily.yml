@@ -7,6 +7,13 @@ on:
     - cron: '30 2 * * 1,4'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: asoul-support
+  cancel-in-progress: false
+
 # ═══════════════════════════════════════════
 # 🔧 配置区（按需修改 true / false）
 # ═══════════════════════════════════════════
@@ -27,14 +34,22 @@ env:
 jobs:
   support:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+
+      - name: 验证 B 站登录态
+        env:
+          SESSDATA: ${{ secrets.SESSDATA }}
+          BILI_JCT: ${{ secrets.BILI_JCT }}
+        run: |
+          python3 scripts/check_auth.py --sessdata "$SESSDATA" --bili-jct "$BILI_JCT"
 
       - name: 👍 视频点赞
         if: env.ENABLE_VIDEO_LIKE == 'true'
