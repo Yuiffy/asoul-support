@@ -11,3 +11,14 @@ logs/
 # 个人内容 / 系统垃圾
 text2speech.md
 .DS_Store
+
+# Local cloud configuration and deployment artifacts (never publish credentials)
+accounts.json
+accounts.local.json
+config.local.json
+.env
+.env.*
+!.env.example
+*.zip
+secrets/
+temp/

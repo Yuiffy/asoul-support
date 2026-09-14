@@ -1,0 +1,18 @@
+[
+  {
+    "role": "primary",
+    "uid": 123456789,
+    "cookie": "SESSDATA=REPLACE_ME; bili_jct=REPLACE_ME; LIVE_BUVID=REPLACE_ME",
+    "allow_paid": false,
+    "other_medals": false,
+    "banned_uids": []
+  },
+  {
+    "role": "secondary",
+    "uid": 987654321,
+    "cookie": "SESSDATA=REPLACE_ME; bili_jct=REPLACE_ME; LIVE_BUVID=REPLACE_ME",
+    "allow_paid": false,
+    "other_medals": false,
+    "banned_uids": []
+  }
+]

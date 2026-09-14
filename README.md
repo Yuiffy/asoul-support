@@ -1,3 +1,5 @@
+> 此 fork 新增 [华为云 FunctionGraph 版本](cloud_function/README.md)：按新版每日任务进度执行点赞、弹幕和观看，支持单一主账号每天最多补送 1 个岁己粉丝团灯牌，以及只做免费任务的副账号。真实账号配置和 Cookie 使用云环境变量，公开仓库只提供配置示例。
+
 <p align="center">
   <img src="assets/asoul-logo.png" width="120" alt="A-SOUL Logo" />
 </p>

@@ -1,0 +1,23 @@
+name: Cloud function checks
+on:
+  workflow_dispatch:
+  push:
+    paths: ['cloud_function/**', '.github/workflows/cloud-function.yml']
+  pull_request:
+    paths: ['cloud_function/**', '.github/workflows/cloud-function.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s cloud_function -p 'test_*.py'
+      - run: python cloud_function/build.py dist/asoul-sui-medal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: functiongraph-code
+          path: dist/asoul-sui-medal.zip
