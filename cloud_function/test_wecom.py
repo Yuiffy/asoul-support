@@ -5,6 +5,14 @@ from wecom_notify import events, send_notice
 
 
 class WeComTests(unittest.TestCase):
+    def test_changed_robot_uses_separate_deduplication_record(self):
+        ledger, opener = Mock(), Mock()
+        opener.open.side_effect = [io.BytesIO(b'{"errcode":0}'), io.BytesIO(b'{"errcode":0}')]
+        with patch('wecom_notify.urllib.request.build_opener',return_value=opener):
+            for key in ('first','second'):
+                send_notice({'WECOM_WEBHOOK_URL':'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key='+key},ledger,'day-test','text')
+        self.assertNotEqual(ledger.reserve.call_args_list[0].args[0], ledger.reserve.call_args_list[1].args[0])
+
     def test_normal_partial_run_is_quiet(self):
         row = {'room': 25788785, 'account': {'uid': 123}, 'after': {'watchLive':[3,10]}}
         self.assertEqual(events('2026-09-14', [], [row], 123), [])

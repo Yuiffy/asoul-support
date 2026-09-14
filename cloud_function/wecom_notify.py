@@ -23,7 +23,8 @@ def send_notice(settings, ledger, key, text):
             or not urllib.parse.parse_qs(parsed.query).get('key')):
         return 'invalid_webhook'
     try:
-        if not ledger.reserve('runs/notifications/' + key + '.json', {'event': key}):
+        destination = hashlib.sha256(url.encode()).hexdigest()[:16]
+        if not ledger.reserve('runs/notifications/' + destination + '/' + key + '.json', {'event': key}):
             return 'already_attempted'
         # Plain text avoids mentions/markup from account names or error strings.
         content = text.encode('utf-8')[:2000].decode('utf-8', errors='ignore')
