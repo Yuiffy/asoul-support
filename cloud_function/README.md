@@ -6,7 +6,8 @@ heartbeats while the streamer is live. Sui is the primary target. Other existing
 medals are optional, rotated five at a time, with one free interaction round and
 danmaku only while offline. Optional rooms are watched only when the account's
 Sui watch task still needs time and Sui is live, keeping them from extending the
-function into an all-day background worker. No third-party notifications are sent.
+function into an all-day background worker. Optional WeCom notifications use your
+own encrypted webhook configuration.
 
 ## Configuration and secrets
 
@@ -21,6 +22,7 @@ Do not put real cookies into the repository or test events.
 | `ENABLE_PAID_GIFT` | `true` to allow the primary account's daily gift; default off |
 | `PAID_ACCOUNT_UID` | Must match the primary account's UID, in addition to its `allow_paid: true` |
 | `OBS_BUCKET` | Private standard OBS bucket in cn-south-1 for execution reservations |
+| `WECOM_WEBHOOK_URL` | Optional WeCom group robot webhook; store as an AES encrypted variable |
 
 Secondary accounts **cannot** send paid gifts even if their `allow_paid` is accidentally
 enabled. No other streamer can receive paid gifts. Missing/expired cookies or a UID
@@ -62,6 +64,21 @@ actual billing depends on total account usage. OBS and paid Bilibili gifts are
 separate from FunctionGraph's free tier. No reserved instances or LTS are needed.
 Sources: [free tier](https://support.huaweicloud.com/price-functiongraph/functiongraph_00_0012.html),
 [pricing](https://www.huaweicloud.com/pricing/calculator.html?tab=detail#/obs).
+
+## WeCom notifications
+
+Notifications are sent for confirmed lamp gifts, completed daily Sui tasks, full
+free-intimacy storage, account login errors and execution failures. Normal partial
+progress stays quiet. A durable OBS reservation permits only one notification
+attempt for each event per day; uncertain HTTP outcomes are not blindly retried.
+Only `qyapi.weixin.qq.com/cgi-bin/webhook/send` HTTPS URLs are accepted. Webhook keys
+and cookies are never included in messages or logs. OBS downtime can also prevent
+notification deduplication, so inspect the cloud execution record if no alert arrives.
+
+Test events: `{"mode":"ledger_check"}` verifies a first append succeeds and a
+duplicate is rejected; `{"mode":"notify_test"}` sends one setup test per day.
+`{"max_seconds":150}` performs a bounded real run after action switches are enabled.
+These events contain no credentials and cannot change account or spending limits.
 
 ## Paid-gift boundaries
 

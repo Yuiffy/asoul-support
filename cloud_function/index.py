@@ -17,6 +17,7 @@ import urllib.request
 import uuid
 
 from asoul_x25kn import enter, heartbeat
+from wecom_notify import report, send_notice
 
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.INFO)
@@ -42,7 +43,7 @@ def today():
 
 def settings_from(context):
     settings = {}
-    for key in ('BILIBILI_ACCOUNTS_JSON', 'ENABLE_ACTIONS', 'ENABLE_PAID_GIFT', 'PAID_ACCOUNT_UID', 'OBS_BUCKET'):
+    for key in ('BILIBILI_ACCOUNTS_JSON', 'ENABLE_ACTIONS', 'ENABLE_PAID_GIFT', 'PAID_ACCOUNT_UID', 'OBS_BUCKET', 'WECOM_WEBHOOK_URL'):
         value = context.getUserData(key) if context is not None and hasattr(context, 'getUserData') else None
         settings[key] = value if value is not None else os.environ.get(key, '')
     return settings
@@ -386,10 +387,24 @@ def run_room(account, room_id, uid, day, deadline, ledger, settings):
 def handler(event, context):
     event = event if isinstance(event, dict) else {}
     settings = settings_from(context)
+    if event.get('mode') == 'notify_test':
+        ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
+        status = send_notice(settings, ledger, today() + '-test',
+                             '岁己云函数企微通知测试\n灯牌送出、每日任务完成和异常时通知，正常轮询不刷屏。\n仅主账号给岁己送灯牌，每天最多 1 个、1 电池；副账号和其他主播只做免费任务。')
+        return {'status': 'notification_test', 'notification': status}
+    if event.get('mode') == 'ledger_check':
+        ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
+        key = 'runs/_probe/' + uuid.uuid4().hex + '.json'
+        first = ledger.reserve(key, {'check': 'atomic_reservation'})
+        second = ledger.reserve(key, {'check': 'must_not_overwrite'})
+        if first is not True or second is not False:
+            raise TaskError('Durable reservation check failed')
+        return {'status': 'ledger_verified', 'first_reserved': first, 'duplicate_blocked': not second}
     if event.get('mode') == 'health':
         return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 1,
                 'actions_enabled': settings.get('ENABLE_ACTIONS') == 'true',
-                'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true'}
+                'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true',
+                'wecom_configured': bool(settings.get('WECOM_WEBHOOK_URL'))}
     accounts = json.loads(settings.get('BILIBILI_ACCOUNTS_JSON') or '[]')
     if not accounts:
         return {'status': 'needs_credentials'}
@@ -441,11 +456,16 @@ def handler(event, context):
     if event.get('mode') == 'inspect' or settings.get('ENABLE_ACTIONS') != 'true':
         return {'status': 'inspection_only', 'accounts': identities}
     if not targets:
-        return {'status': 'no_valid_accounts', 'accounts': identities}
+        ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
+        return {'status': 'no_valid_accounts', 'accounts': identities,
+                'notifications': report(settings, ledger, today(), identities, [])}
     ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
     # Finish all workers before the next half-hour boundary, including delayed/retried events.
     slot_end = (int(time.time()) // 1800 + 1) * 1800 - 30
-    budget = min(1680, slot_end - time.time())
+    requested_budget = event.get('max_seconds', 1680)
+    if type(requested_budget) not in (int, float) or not 90 <= requested_budget <= 1680:
+        raise TaskError('max_seconds must be between 90 and 1680')
+    budget = min(1680, requested_budget, slot_end - time.time())
     if budget < 90:
         return {'status': 'too_late_in_slot'}
     day, deadline = today(), time.monotonic() + budget
@@ -460,4 +480,5 @@ def handler(event, context):
                 message = str(exc) if isinstance(exc, TaskError) else type(exc).__name__
                 LOG.error('Worker stopped: %s', message)
                 results.append({'status': 'error', 'reason': message})
-    return {'status': 'finished', 'day': day, 'results': results}
+    return {'status': 'finished', 'day': day, 'results': results,
+            'notifications': report(settings, ledger, day, identities, results)}
