@@ -40,6 +40,14 @@ def today():
     return dt.datetime.now(CST).date().isoformat()
 
 
+def settings_from(context):
+    settings = {}
+    for key in ('BILIBILI_ACCOUNTS_JSON', 'ENABLE_ACTIONS', 'ENABLE_PAID_GIFT', 'PAID_ACCOUNT_UID', 'OBS_BUCKET'):
+        value = context.getUserData(key) if context is not None and hasattr(context, 'getUserData') else None
+        settings[key] = value if value is not None else os.environ.get(key, '')
+    return settings
+
+
 def progress(data, kind):
     """Unknown schemas fail closed; a completed round is not necessarily the daily cap."""
     items = [t for t in data.get('task_info', []) if t.get('jump_type') == kind]
@@ -191,8 +199,8 @@ class ObsLedger:
         self.opener = urllib.request.build_opener(NoRedirect())
 
     def reserve(self, key, value):
-        ak = self.context.getAccessKey()
-        sk = self.context.getSecretKey()
+        ak = self.context.getSecurityAccessKey()
+        sk = self.context.getSecuritySecretKey()
         token = self.context.getSecurityToken()
         if not all((ak, sk, token)):
             raise TaskError('Function execution agency credentials unavailable')
@@ -347,7 +355,7 @@ def watch(client, room_id, uid, data, day, deadline):
     return client.tasks(uid)
 
 
-def run_room(account, room_id, uid, day, deadline, ledger):
+def run_room(account, room_id, uid, day, deadline, ledger, settings):
     client = Bili(account['cookie'], account['uid'])
     identity = client.login()
     data = client.tasks(uid)
@@ -356,8 +364,8 @@ def run_room(account, room_id, uid, day, deadline, ledger):
     if not ledger.reserve(f'runs/{client.uid}/{room_id}/{slot}.json', {'day': day}):
         return {'uid': client.uid, 'room': room_id, 'status': 'duplicate_slot'}
     allow_paid = (account.get('role') == 'primary' and account.get('allow_paid') is True and uid == SUI_UID
-                  and str(client.uid) == os.environ.get('PAID_ACCOUNT_UID', '')
-                  and os.environ.get('ENABLE_PAID_GIFT') == 'true')
+                  and str(client.uid) == settings.get('PAID_ACCOUNT_UID', '')
+                  and settings.get('ENABLE_PAID_GIFT') == 'true')
     try:
         gift = maybe_gift(client, ledger, allow_paid, day) if uid == SUI_UID else 'disabled_other_room'
     except TaskError:
@@ -376,11 +384,12 @@ def run_room(account, room_id, uid, day, deadline, ledger):
 
 def handler(event, context):
     event = event if isinstance(event, dict) else {}
+    settings = settings_from(context)
     if event.get('mode') == 'health':
         return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 1,
-                'actions_enabled': os.environ.get('ENABLE_ACTIONS') == 'true',
-                'paid_enabled': os.environ.get('ENABLE_PAID_GIFT') == 'true'}
-    accounts = json.loads(os.environ.get('BILIBILI_ACCOUNTS_JSON', '[]'))
+                'actions_enabled': settings.get('ENABLE_ACTIONS') == 'true',
+                'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true'}
+    accounts = json.loads(settings.get('BILIBILI_ACCOUNTS_JSON') or '[]')
     if not accounts:
         return {'status': 'needs_credentials'}
     if not isinstance(accounts, list) or len(accounts) > 2:
@@ -410,9 +419,9 @@ def handler(event, context):
                 offset = (int(time.time()) // 1800 * 5) % len(others)
                 others = (others[offset:] + others[:offset])[:5]
             targets.extend((account, room, anchor) for room, anchor in others)
-    if event.get('mode') == 'inspect' or os.environ.get('ENABLE_ACTIONS') != 'true':
+    if event.get('mode') == 'inspect' or settings.get('ENABLE_ACTIONS') != 'true':
         return {'status': 'inspection_only', 'accounts': identities}
-    ledger = ObsLedger(context, os.environ.get('OBS_BUCKET', ''))
+    ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
     # Finish all workers before the next half-hour boundary, including delayed/retried events.
     slot_end = (int(time.time()) // 1800 + 1) * 1800 - 30
     budget = min(1680, slot_end - time.time())
@@ -421,7 +430,7 @@ def handler(event, context):
     day, deadline = today(), time.monotonic() + budget
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
-        futures = [executor.submit(run_room, a, r, u, day, deadline, ledger) for a, r, u in targets]
+        futures = [executor.submit(run_room, a, r, u, day, deadline, ledger, settings) for a, r, u in targets]
         for future in concurrent.futures.as_completed(futures):
             try:
                 results.append(future.result())

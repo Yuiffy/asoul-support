@@ -92,6 +92,24 @@ class GiftTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_secondary_cannot_pay_even_if_misconfigured(self):
+        account = {'role': 'secondary', 'uid': 123, 'cookie': 'unused', 'allow_paid': True}
+        settings = {'PAID_ACCOUNT_UID': '123', 'ENABLE_PAID_GIFT': 'true'}
+        client = Mock(uid=123)
+        data = medal()
+        data['reach_free_intimacy_limit'] = True
+        client.tasks.return_value = data
+        client.login.return_value = {'uid': 123}
+        with patch('index.Bili', return_value=client), patch('index.maybe_gift', return_value='disabled_for_account') as gift:
+            cloud.run_room(account, cloud.SUI_ROOM, cloud.SUI_UID, cloud.today(), 0, Ledger(), settings)
+        self.assertIs(gift.call_args.args[2], False)
+
+    def test_functiongraph_context_decrypts_environment(self):
+        context = Mock()
+        context.getUserData.side_effect = lambda key: {'ENABLE_ACTIONS': 'true'}.get(key)
+        with patch.dict(os.environ, {'ENABLE_ACTIONS': 'false'}):
+            self.assertEqual(cloud.settings_from(context)['ENABLE_ACTIONS'], 'true')
+
     def test_upstream_hmac_vector(self):
         payload = ('{"platform":"web","parent_id":9,"area_id":371,"seq_id":1,'
                    '"room_id":22632424,"buvid":"TEST-BUVID",'
