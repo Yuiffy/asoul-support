@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +32,35 @@ MIXIN = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,2
 
 class TaskError(RuntimeError):
     pass
+
+
+class ApiError(TaskError):
+    def __init__(self, code, endpoint, message):
+        self.code, self.endpoint = code, endpoint
+        super().__init__(f'{endpoint}: code={code}; {message}')
+
+
+class AccountGate:
+    """Shared across one account's queue and watch workers, never a room-local limit."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.last = 0.0
+        self.last_danmu = 0.0
+        self.stopped = False
+        self.disabled = set()
+
+    def check(self, endpoint):
+        if self.stopped:
+            raise TaskError('Account paused after risk control; deferred until next scheduled run')
+        if endpoint in self.disabled:
+            raise TaskError('Endpoint paused after rejection: ' + endpoint)
+
+    def rejected(self, code, endpoint):
+        if code in (-352, -412, -101):
+            self.stopped = True
+        if code == 10030:
+            self.disabled.add(endpoint)
+
 
 
 def compact(value):
@@ -80,8 +110,9 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class Bili:
-    def __init__(self, cookie, expected_uid):
+    def __init__(self, cookie, expected_uid, gate=None):
         self.cookie = cookie
+        self.gate = gate or AccountGate()
         jar = http.cookies.SimpleCookie()
         jar.load(cookie)
         self.cookies = {k: v.value for k, v in jar.items()}
@@ -98,6 +129,8 @@ class Bili:
             'api.bilibili.com', 'api.live.bilibili.com', 'live-trace.bilibili.com'
         }:
             raise TaskError('Unexpected Bilibili host')
+        endpoint = urllib.parse.urlsplit(url).path
+        self.gate.check(endpoint)
         params = dict(params or {})
         if signed:
             if not self.salt:
@@ -116,14 +149,37 @@ class Bili:
             body = urllib.parse.urlencode(form or {}).encode()
             headers['Content-Type'] = 'application/x-www-form-urlencoded'
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        # Wait for the account's danmaku cooldown outside the network lock so
+        # a scheduled heartbeat is not blocked behind a 30-second chat wait.
+        if endpoint == '/msg/send':
+            while self.gate.last_danmu + 30 > time.monotonic():
+                self.gate.check(endpoint)
+                time.sleep(min(1, self.gate.last_danmu + 30 - time.monotonic()))
         # No automatic POST retries: a timeout may mean the server accepted it.
         try:
-            with self.opener.open(req, timeout=15) as response:
-                result = json.load(response)
+            with self.gate.lock:
+                self.gate.check(endpoint)
+                delay = max(0, self.gate.last + 1.5 - time.monotonic())
+                if delay > 0:
+                    time.sleep(delay)
+                self.gate.last = time.monotonic()
+                if endpoint == '/msg/send':
+                    self.gate.last_danmu = self.gate.last
+                with self.opener.open(req, timeout=15) as response:
+                    result = json.load(response)
+                if result.get('code') != 0:
+                    self.gate.rejected(result.get('code'), endpoint)
+        except TaskError:
+            raise
         except Exception as exc:
-            raise TaskError('Bilibili transport failure: ' + type(exc).__name__) from None
+            raise TaskError(endpoint + ': Bilibili transport failure: ' + type(exc).__name__) from None
         if result.get('code') != 0:
-            raise TaskError('Bilibili API rejected request, code=' + str(result.get('code')))
+            message = str(result.get('message') or result.get('msg') or 'no message')
+            for secret in self.cookies.values():
+                if len(secret) >= 4:
+                    message = message.replace(secret, '[redacted]')
+            message = re.sub(r'https?://\S+|[A-Za-z0-9_%-]{24,}', '[redacted]', message)[:140]
+            raise ApiError(result.get('code'), endpoint, message)
         if result.get('msg') in ('k', 'f'):
             raise TaskError('Danmaku filtered; stopped')
         return result.get('data') or {}
@@ -168,6 +224,7 @@ class Bili:
                             method='POST', signed=True)
 
     def danmu(self, room_id, message):
+        self.gate.check('/msg/send')
         return self.request(LIVE + '/msg/send', {'web_location': '444.8'}, 'POST', True,
                             {'msg': message, 'roomid': room_id, 'bubble': 0, 'color': 16777215,
                              'mode': 1, 'room_type': 0, 'fontsize': 25, 'rnd': int(time.time()),
@@ -273,6 +330,9 @@ def alive(day, deadline):
 
 def free_actions(client, room_id, uid, data, day, deadline, max_rounds, offline_only):
     for kind in ('like', 'sendDanmu'):
+        endpoint = '/msg/send' if kind == 'sendDanmu' else '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
+        if endpoint in client.gate.disabled:
+            continue
         for _ in range(max_rounds):
             if not alive(day, deadline) or data.get('reach_free_intimacy_limit') or not pending(data, kind):
                 break
@@ -320,6 +380,8 @@ def watch(client, room_id, uid, data, day, deadline):
         raise TaskError('No Bilibili-issued device ID')
     device = [buvid, str(uuid.uuid4())]
     ids = [int(info['parent_area_id']), int(info['area_id']), 0, room_id]
+    watch_deadline = min(deadline, time.monotonic() + (9600 if uid == SUI_UID else 960))
+    deadline = watch_deadline
     state = enter(client.trace, ids, device, uid)
     seq, last_check, last_progress, stalled = 1, time.monotonic(), progress(data, 'watchLive')[0], 0
     while alive(day, deadline):
@@ -358,33 +420,120 @@ def watch(client, room_id, uid, data, day, deadline):
     return client.tasks(uid)
 
 
-def run_room(account, room_id, uid, day, deadline, ledger, settings):
-    client = Bili(account['cookie'], account['uid'])
-    identity = client.login()
-    data = client.tasks(uid)
-    before = summary(data)
-    slot = int(time.time()) // 1800
-    if not ledger.reserve(f'runs/{client.uid}/{room_id}/{slot}.json', {'day': day}):
-        return {'uid': client.uid, 'room': room_id, 'status': 'duplicate_slot'}
-    allow_paid = (account.get('role') == 'primary' and account.get('allow_paid') is True and uid == SUI_UID
-                  and str(client.uid) == settings.get('PAID_ACCOUNT_UID', '')
-                  and settings.get('ENABLE_PAID_GIFT') == 'true')
+def queue_error(client, identity, room, before, exc):
+    return {'account': identity, 'room': room, 'before': before, 'after': before,
+            'status': 'error', 'reason': str(exc) if isinstance(exc, TaskError) else type(exc).__name__,
+            'watch_seconds': client.watch_seconds}
+
+
+def run_account_queue(account, day, deadline, ledger, settings):
+    gate = AccountGate()
+    identity = {'uid': account['uid']}
+    metadata = {'account': identity, 'pending_rooms': 0}
+    rows = {}
     try:
-        gift = maybe_gift(client, ledger, allow_paid, day) if uid == SUI_UID else 'disabled_other_room'
-    except TaskError:
-        gift = 'failed_or_uncertain_no_retry'
-        LOG.warning('Gift attempt stopped for UID %s; no same-day retry', client.uid)
-    data = client.tasks(uid)
-    if not data.get('reach_free_intimacy_limit'):
-        data = free_actions(client, room_id, uid, data, day, deadline,
-                            10 if uid == SUI_UID else 1, offline_only=(uid != SUI_UID))
-        if uid == SUI_UID or account.get('_watch_with_primary') is True:
-            data = watch(client, room_id, uid, data, day, deadline)
-    result = {'account': identity, 'room': room_id, 'before': before, 'after': summary(data),
-              'gift': gift, 'storage_full': bool(data.get('reach_free_intimacy_limit')),
-              'watch_seconds': client.watch_seconds}
-    LOG.info('%s', compact(result))
-    return result
+        client = Bili(account['cookie'], account['uid'], gate)
+        identity = client.login()
+        metadata['account'] = identity
+        medals = client.medal_rooms() if account.get('other_medals') else {SUI_ROOM: SUI_UID}
+        banned = {int(x) for x in account.get('banned_uids', [])}
+        targets = [(SUI_ROOM, SUI_UID)] + [(r,u) for r,u in medals.items() if r != SUI_ROOM and u not in banned]
+        metadata['medal_rooms_total'] = len(medals)
+        metadata['eligible_rooms'] = len(targets)
+        watch_targets = []
+        primary_future = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as watcher:
+            for room, uid in targets:
+                if gate.stopped or not alive(day, deadline):
+                    break
+                before = {}
+                try:
+                    data = client.tasks(uid)
+                    before = summary(data)
+                    gift = 'disabled_other_room'
+                    if room == SUI_ROOM:
+                        paid = (account.get('role') == 'primary' and account.get('allow_paid') is True
+                                and str(client.uid) == settings.get('PAID_ACCOUNT_UID')
+                                and settings.get('ENABLE_PAID_GIFT') == 'true')
+                        try:
+                            gift = maybe_gift(client, ledger, paid, day)
+                        except TaskError as exc:
+                            gift = 'failed_or_uncertain_no_retry'
+                            if gate.stopped:
+                                raise
+                        data = client.tasks(uid)
+                    row = {'account': identity, 'room': room, 'before': before, 'after': summary(data),
+                           'gift': gift, 'storage_full': bool(data.get('reach_free_intimacy_limit')), 'watch_seconds':0}
+                    rows[room] = row
+                    if row['storage_full']:
+                        continue
+                    # One round per room first: the entire medal list is visited before repeats.
+                    data = free_actions(client, room, uid, data, day, deadline, 1, offline_only=(uid != SUI_UID))
+                    row['after'] = summary(data)
+                    if pending(data, 'watchLive') and client.room(room).get('live_status') == 1:
+                        if room == SUI_ROOM:
+                            primary_future = watcher.submit(queue_watch, account, gate, room, uid, data, day, deadline)
+                        else:
+                            watch_targets.append((room,uid,data))
+                except TaskError as exc:
+                    row = rows.get(room, queue_error(client, identity, room, before, exc))
+                    row.update(status='error',reason=str(exc))
+                    rows[room] = row
+            metadata['pending_rooms'] = len(targets) - len(rows)
+            # Sweep remaining free rounds fairly; never retry a rejected room during this run.
+            for _ in range(9):
+                changed = False
+                for room, uid in targets:
+                    if gate.stopped or not alive(day, deadline):
+                        break
+                    row = rows.get(room)
+                    if not row or row.get('status') == 'error' or row.get('storage_full'):
+                        continue
+                    if not any(row['after'].get(k) and row['after'][k][0] < row['after'][k][1]
+                               for k in ('like','sendDanmu')):
+                        continue
+                    try:
+                        data = client.tasks(uid)
+                        data = free_actions(client,room,uid,data,day,deadline,1,offline_only=(uid != SUI_UID))
+                        updated = summary(data)
+                        changed |= updated != row['after']
+                        row['after'] = updated
+                    except TaskError as exc:
+                        row.update(status='error',reason=str(exc))
+                if not changed or gate.stopped or not alive(day,deadline):
+                    break
+            # Other watch rooms are queued, one at a time, alongside the Sui watch worker.
+            for room, uid, data in watch_targets:
+                if gate.stopped or not alive(day, deadline):
+                    break
+                try:
+                    update, seconds = queue_watch(account,gate,room,uid,data,day,deadline)
+                    rows[room].update(after=summary(update),watch_seconds=seconds)
+                except TaskError as exc:
+                    rows[room].update(status='error',reason=str(exc))
+            if primary_future:
+                try:
+                    update, seconds = primary_future.result()
+                    rows[SUI_ROOM].update(after=summary(update),watch_seconds=seconds)
+                except TaskError as exc:
+                    rows[SUI_ROOM].update(status='error',reason=str(exc))
+        metadata['paused_by_risk'] = gate.stopped
+        metadata['incomplete_rooms'] = sum(not all(row.get('after',{}).get(k) and row['after'][k][0]>=row['after'][k][1]
+                                                   for k in ('watchLive','sendDanmu','like')) for row in rows.values())
+    except TaskError as exc:
+        metadata.update(status='error',reason=str(exc),paused_by_risk=gate.stopped)
+    except Exception as exc:
+        metadata.update(status='error',reason=type(exc).__name__)
+    return metadata, list(rows.values())
+
+
+def queue_watch(account, gate, room, uid, data, day, deadline):
+    if not alive(day, deadline) or gate.stopped:
+        return data, 0
+    worker = Bili(account['cookie'], account['uid'], gate)
+    worker.login()
+    result = watch(worker,room,uid,data,day,deadline)
+    return result, worker.watch_seconds
 
 
 def handler(event, context):
@@ -404,7 +553,7 @@ def handler(event, context):
             raise TaskError('Durable reservation check failed')
         return {'status': 'ledger_verified', 'first_reserved': first, 'duplicate_blocked': not second}
     if event.get('mode') == 'health':
-        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 1,
+        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v2',
                 'actions_enabled': settings.get('ENABLE_ACTIONS') == 'true',
                 'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true',
                 'wecom_configured': bool(settings.get('WECOM_WEBHOOK_URL'))}
@@ -415,78 +564,37 @@ def handler(event, context):
         raise TaskError('Expected one or two explicitly configured accounts')
     if sum(a.get('role') == 'primary' for a in accounts) != 1:
         raise TaskError('Configure exactly one primary account')
-    identities, targets = [], []
-    seen = set()
-    for account in accounts:
-        uid = int(account['uid'])
-        if uid in seen:
-            raise TaskError('Duplicate account UID')
-        seen.add(uid)
-        try:
-            client = Bili(account['cookie'], uid)
-            identity = client.login()
-            data = client.tasks(SUI_UID)
-        except TaskError as exc:
-            identities.append({'account': {'uid': uid}, 'status': 'error', 'reason': str(exc)})
-            LOG.warning('Account %s unavailable; other accounts continue', uid)
-            continue
-        identities.append({'account': identity, 'tasks': summary(data),
-                           'storage_full': bool(data.get('reach_free_intimacy_limit'))})
-        account = dict(account)
-        account['_watch_with_primary'] = False
-        if pending(data, 'watchLive') and not data.get('reach_free_intimacy_limit'):
-            try:
-                main_room = client.room(SUI_ROOM)
-                account['_watch_with_primary'] = (main_room.get('live_status') == 1
-                                                   and int(main_room.get('uid', 0)) == SUI_UID)
-            except TaskError:
-                pass
-        targets.append((account, SUI_ROOM, SUI_UID))
-        # Optional secondary rooms: existing medals only, explicit per-account enable, capped.
-        if account.get('other_medals') is True:
-            banned = {int(x) for x in account.get('banned_uids', [])}
-            try:
-                medals = client.medal_rooms()
-                identities[-1]['medal_rooms_total'] = len(medals)
-                others = [(room, anchor) for room, anchor in medals.items()
-                          if room != SUI_ROOM and anchor not in banned]
-            except TaskError:
-                LOG.warning('Optional medal enumeration failed for %s; primary room continues', uid)
-                others = []
-            # Rotate pages so a large medal list is eventually covered.
-            if others:
-                offset = (int(time.time()) // 1800 * 5) % len(others)
-                others = (others[offset:] + others[:offset])[:5]
-            targets.extend((account, room, anchor) for room, anchor in others)
     if event.get('mode') == 'inspect' or settings.get('ENABLE_ACTIONS') != 'true':
-        return {'status': 'inspection_only', 'accounts': identities}
-    if not targets:
-        ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
-        return {'status': 'no_valid_accounts', 'accounts': identities,
-                'notifications': report(settings, ledger, today(), identities, [])}
-    ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
-    # Finish all workers before the next half-hour boundary, including delayed/retried events.
-    slot_end = (int(time.time()) // 1800 + 1) * 1800 - 30
-    requested_budget = event.get('max_seconds', 1680)
-    if type(requested_budget) not in (int, float) or not 90 <= requested_budget <= 1680:
-        raise TaskError('max_seconds must be between 90 and 1680')
-    budget = min(1680, requested_budget, slot_end - time.time())
-    if budget < 90:
-        return {'status': 'too_late_in_slot'}
-    day, deadline = today(), time.monotonic() + budget
-    results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
-        futures = {executor.submit(run_room, a, r, u, day, deadline, ledger, settings): (a, r)
-                   for a, r, u in targets}
-        for future in concurrent.futures.as_completed(futures):
+        identities = []
+        for account in accounts:
             try:
-                results.append(future.result())
-            except Exception as exc:
-                # Do not log raw request URLs, cookies or SDK credential objects.
-                message = str(exc) if isinstance(exc, TaskError) else type(exc).__name__
-                LOG.error('Worker stopped: %s', message)
-                failed_account, failed_room = futures[future]
-                results.append({'status': 'error', 'reason': message,
-                                'account': {'uid': failed_account['uid']}, 'room': failed_room})
-    return {'status': 'finished', 'day': day, 'results': results,
-            'notifications': report(settings, ledger, day, identities, results)}
+                client = Bili(account['cookie'], account['uid'])
+                identity = client.login()
+                data = client.tasks(SUI_UID)
+                identities.append({'account': identity, 'tasks': summary(data),
+                                   'storage_full': bool(data.get('reach_free_intimacy_limit'))})
+            except TaskError as exc:
+                identities.append({'account': {'uid': account['uid']}, 'status': 'error', 'reason': str(exc)})
+        return {'status': 'inspection_only', 'version': 'queue-v2', 'accounts': identities}
+    if len({int(a['uid']) for a in accounts}) != len(accounts):
+        raise TaskError('Duplicate account UID')
+    requested = event.get('max_seconds', 10800)
+    if type(requested) not in (int, float) or not 90 <= requested <= 10800:
+        raise TaskError('max_seconds must be between 90 and 10800')
+    # Respect the deployed timeout even before the console is upgraded.
+    if context is not None and hasattr(context, 'getRemainingTimeInMilliSeconds'):
+        requested = min(requested, max(0, context.getRemainingTimeInMilliSeconds() / 1000 - 60))
+    day, round_id = today(), int(time.time()) // 14400
+    ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
+    if not ledger.reserve(f'runs/queue-v2/{round_id}.json', {'day': day}):
+        return {'status': 'duplicate_run', 'version': 'queue-v2'}
+    identities, results = [], []
+    deadline = time.monotonic() + requested
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(run_account_queue, a, day, deadline, ledger, settings) for a in accounts]
+        for future in concurrent.futures.as_completed(futures):
+            identity, rows = future.result()
+            identities.append(identity)
+            results.extend(rows)
+    return {'status': 'finished', 'version': 'queue-v2', 'day': day, 'accounts': identities,
+            'results': results, 'notifications': report(settings, ledger, day, identities, results, round_id)}

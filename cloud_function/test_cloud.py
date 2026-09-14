@@ -117,7 +117,7 @@ class ProtocolTests(unittest.TestCase):
         client.tasks.return_value = data
         client.login.return_value = {'uid': 123}
         with patch('index.Bili', return_value=client), patch('index.maybe_gift', return_value='disabled_for_account') as gift:
-            cloud.run_room(account, cloud.SUI_ROOM, cloud.SUI_UID, cloud.today(), 0, Ledger(), settings)
+            cloud.run_account_queue(account, cloud.today(), __import__('time').monotonic()+60, Ledger(), settings)
         self.assertIs(gift.call_args.args[2], False)
 
     def test_functiongraph_context_decrypts_environment(self):

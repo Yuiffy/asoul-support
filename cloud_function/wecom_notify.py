@@ -42,7 +42,7 @@ def send_notice(settings, ledger, key, text):
 def events(day, identities, results, primary_uid, round_id=None):
     if not results and not any(r.get('status') == 'error' for r in identities):
         return []
-    round_id = str(round_id if round_id is not None else int(time.time()) // 1800)
+    round_id = str(round_id if round_id is not None else int(time.time()) // 14400)
     accounts = {str(r.get('account', {}).get('uid')): r for r in identities}
     for row in results:
         account = row.get('account') or {'uid': row.get('uid', 'unknown')}
@@ -74,6 +74,9 @@ def events(day, identities, results, primary_uid, round_id=None):
                   f'免费日任务已满{full}间；本轮有进展{improved}间',
                   f'储蓄满跳过{storage}间；重复跳过{duplicate}间；异常{errors}间',
                   f'已接受观看心跳：{seconds}秒']
+        lines.append(f'尚未检查{identity.get("pending_rooms",0)}间；已检查但未满{identity.get("incomplete_rooms",0)}间')
+        if identity.get('paused_by_risk'):
+            lines.append('账号触发风控，本次队列已暂停，未继续重试。')
         sui = next((r for r in rows if r.get('room') == 25788785 and 'after' in r), None)
         if sui:
             values = []
@@ -91,7 +94,7 @@ def events(day, identities, results, primary_uid, round_id=None):
         failures = [r.get('reason', 'unknown') for r in rows if r.get('status') == 'error']
         if failures:
             lines.append('异常原因：' + '；'.join(dict.fromkeys(failures))[:160])
-    lines += ['', '“已满”按B站每日进度确认；每轮另轮换最多5个持牌主播，仅岁己允许主账号限额送礼。']
+    lines += ['', '每4小时启动全量队列，岁己优先；其他主播仅免费，先遍历全部房间再补余下轮次。已满以B站实际进度为准。']
     return [(f'{day}-round-{round_id}', '\n'.join(lines))]
 
 
