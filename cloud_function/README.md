@@ -67,10 +67,13 @@ Sources: [free tier](https://support.huaweicloud.com/price-functiongraph/functio
 
 ## WeCom notifications
 
-Notifications are sent for confirmed lamp gifts, completed daily Sui tasks, full
-free-intimacy storage, account login errors and execution failures. Normal partial
-progress stays quiet. A durable OBS reservation permits only one notification
-attempt for each event per day; uncertain HTTP outcomes are not blindly retried.
+Each real execution sends one final aggregate report across all processed rooms,
+separated by account: covered rooms, total medal-room count when available,
+verified daily free-task completion, confirmed progress, storage-full skips,
+duplicate skips, errors, and accepted watch-heartbeat seconds. Sui's exact task
+progress and lamp result follow the totals. Inspection-only calls send no summary.
+A durable OBS reservation permits only one report attempt per half-hour slot and
+robot destination; uncertain HTTP outcomes are not blindly retried.
 Only `qyapi.weixin.qq.com/cgi-bin/webhook/send` HTTPS URLs are accepted. Webhook keys
 and cookies are never included in messages or logs. OBS downtime can also prevent
 notification deduplication, so inspect the cloud execution record if no alert arrives.

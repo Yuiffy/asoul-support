@@ -90,6 +90,7 @@ class Bili:
         self.csrf = self.cookies['bili_jct']
         self.uid = int(expected_uid)
         self.salt = ''
+        self.watch_seconds = 0
         self.opener = urllib.request.build_opener(NoRedirect())
 
     def request(self, url, params=None, method='GET', signed=False, form=None):
@@ -338,6 +339,7 @@ def watch(client, room_id, uid, data, day, deadline):
             break
         ids[2] = seq
         state = heartbeat(client.trace, ids, device, uid, state)
+        client.watch_seconds += interval
         seq += 1
         if time.monotonic() - last_check >= 180:
             # Verify actual Bilibili progress and ongoing live status during the session.
@@ -379,7 +381,8 @@ def run_room(account, room_id, uid, day, deadline, ledger, settings):
         if uid == SUI_UID or account.get('_watch_with_primary') is True:
             data = watch(client, room_id, uid, data, day, deadline)
     result = {'account': identity, 'room': room_id, 'before': before, 'after': summary(data),
-              'gift': gift, 'storage_full': bool(data.get('reach_free_intimacy_limit'))}
+              'gift': gift, 'storage_full': bool(data.get('reach_free_intimacy_limit')),
+              'watch_seconds': client.watch_seconds}
     LOG.info('%s', compact(result))
     return result
 
@@ -389,8 +392,8 @@ def handler(event, context):
     settings = settings_from(context)
     if event.get('mode') == 'notify_test':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
-        status = send_notice(settings, ledger, today() + '-test',
-                             '岁己云函数企微通知测试\n灯牌送出、每日任务完成和异常时通知，正常轮询不刷屏。\n仅主账号给岁己送灯牌，每天最多 1 个、1 电池；副账号和其他主播只做免费任务。')
+        status = send_notice(settings, ledger, today() + '-test-summary-v2',
+                             '岁己云函数企微通知测试\n每轮结束按账号汇总：覆盖房间数、日任务已满数、有进展数、跳过数和异常数，附岁己进度及灯牌结果。\n仅主账号给岁己送灯牌，每天最多 1 个、1 电池；副账号和其他主播只做免费任务。')
         return {'status': 'notification_test', 'notification': status}
     if event.get('mode') == 'ledger_check':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
@@ -443,7 +446,9 @@ def handler(event, context):
         if account.get('other_medals') is True:
             banned = {int(x) for x in account.get('banned_uids', [])}
             try:
-                others = [(room, anchor) for room, anchor in client.medal_rooms().items()
+                medals = client.medal_rooms()
+                identities[-1]['medal_rooms_total'] = len(medals)
+                others = [(room, anchor) for room, anchor in medals.items()
                           if room != SUI_ROOM and anchor not in banned]
             except TaskError:
                 LOG.warning('Optional medal enumeration failed for %s; primary room continues', uid)
@@ -471,7 +476,8 @@ def handler(event, context):
     day, deadline = today(), time.monotonic() + budget
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(targets)) as executor:
-        futures = [executor.submit(run_room, a, r, u, day, deadline, ledger, settings) for a, r, u in targets]
+        futures = {executor.submit(run_room, a, r, u, day, deadline, ledger, settings): (a, r)
+                   for a, r, u in targets}
         for future in concurrent.futures.as_completed(futures):
             try:
                 results.append(future.result())
@@ -479,6 +485,8 @@ def handler(event, context):
                 # Do not log raw request URLs, cookies or SDK credential objects.
                 message = str(exc) if isinstance(exc, TaskError) else type(exc).__name__
                 LOG.error('Worker stopped: %s', message)
-                results.append({'status': 'error', 'reason': message})
+                failed_account, failed_room = futures[future]
+                results.append({'status': 'error', 'reason': message,
+                                'account': {'uid': failed_account['uid']}, 'room': failed_room})
     return {'status': 'finished', 'day': day, 'results': results,
             'notifications': report(settings, ledger, day, identities, results)}

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import logging
+import time
 import urllib.parse
 import urllib.request
 
@@ -38,40 +39,62 @@ def send_notice(settings, ledger, key, text):
         return 'failed_or_uncertain'
 
 
-def events(day, identities, results, primary_uid):
-    notices = []
-    for row in identities:
-        if row.get('status') == 'error':
-            uid = row.get('account', {}).get('uid', 'unknown')
-            notices.append((f'{day}-account-{uid}', f'岁己云函数：账号 {uid} 登录或任务读取失败。\n{day}\n{row.get("reason", "unknown")}\n其他账号会继续执行。'))
+def events(day, identities, results, primary_uid, round_id=None):
+    if not results and not any(r.get('status') == 'error' for r in identities):
+        return []
+    round_id = str(round_id if round_id is not None else int(time.time()) // 1800)
+    accounts = {str(r.get('account', {}).get('uid')): r for r in identities}
     for row in results:
-        if row.get('status') == 'error':
-            reason = row.get('reason', 'unknown')
-            code = hashlib.sha256(reason.encode()).hexdigest()[:12]
-            notices.append((f'{day}-error-{code}', f'岁己云函数执行异常\n{day}\n{reason}\n请查看华为云函数执行记录；相同错误当天只提醒一次。'))
+        account = row.get('account') or {'uid': row.get('uid', 'unknown')}
+        accounts.setdefault(str(account.get('uid')), {'account': account})
+    rooms = {r['room'] for r in results if r.get('room')}
+    lines = ['直播亲密度任务 · 本轮统计', day,
+             f'本轮检查：{len(results)}次，涉及{len(rooms)}个直播间（两个账号分别统计）']
+    for uid, identity in accounts.items():
+        name = identity.get('account', {}).get('name', uid)
+        rows = [r for r in results if str((r.get('account') or {}).get('uid', r.get('uid', 'unknown'))) == uid]
+        if identity.get('status') == 'error':
+            lines += ['', str(name) + '：账号检查失败', str(identity.get('reason', 'unknown'))[:120]]
             continue
-        if row.get('room') != 25788785 or 'after' not in row:
-            continue
-        account = row.get('account', {})
-        uid, name = account.get('uid'), account.get('name', str(account.get('uid')))
-        state = row['after']
-        lines = [f'岁己亲密度任务 · {name}', day]
-        for kind, label in [('watchLive','观看'),('sendDanmu','弹幕'),('like','点赞'),('feedLight','灯牌')]:
-            value = state.get(kind)
-            lines.append(label + '：' + ('/'.join(map(str,value)) if value else '状态未知'))
-        if row.get('gift') == 'confirmed':
-            notices.append((f'{day}-gift-{uid}', '\n'.join(lines + ['已确认补送 1 个粉丝团灯牌，最多消耗 1 电池。'])))
-        elif row.get('gift') in ('failed_or_uncertain_no_retry', 'sent_unconfirmed_no_retry'):
-            notices.append((f'{day}-gift-uncertain-{uid}', '\n'.join(lines + ['灯牌结果未确认，当天不再重试，避免重复扣费。'])))
-        if row.get('storage_full'):
-            notices.append((f'{day}-storage-{uid}', '\n'.join(lines + ['免费亲密度储蓄已满，本轮未继续免费任务。副账号不会自动购买灯牌。'])))
-        free_complete = all(state.get(k) and state[k][0] >= state[k][1] for k in ('watchLive','sendDanmu','like'))
-        lamp = state.get('feedLight')
-        if free_complete and (str(uid) != str(primary_uid) or (lamp and lamp[0] >= lamp[1])):
-            notices.append((f'{day}-complete-{uid}', '\n'.join(lines + ['今天的目标任务已完成。'])))
-    return notices
+        full, improved, storage, duplicate, errors, seconds = 0, 0, 0, 0, 0, 0
+        for row in rows:
+            after, before = row.get('after', {}), row.get('before', {})
+            if all(after.get(k) and after[k][0] >= after[k][1] for k in ('watchLive','sendDanmu','like')):
+                full += 1
+            if any(after.get(k) and before.get(k) and after[k][0] > before[k][0]
+                   for k in ('watchLive','sendDanmu','like','feedLight')):
+                improved += 1
+            storage += bool(row.get('storage_full'))
+            duplicate += row.get('status') == 'duplicate_slot'
+            errors += row.get('status') == 'error'
+            seconds += row.get('watch_seconds', 0)
+        total = identity.get('medal_rooms_total')
+        coverage = f'{len(rows)}/{total}' if total is not None else str(len(rows))
+        lines += ['', str(name) + f'：本轮覆盖{coverage}个持牌直播间',
+                  f'免费日任务已满{full}间；本轮有进展{improved}间',
+                  f'储蓄满跳过{storage}间；重复跳过{duplicate}间；异常{errors}间',
+                  f'已接受观看心跳：{seconds}秒']
+        sui = next((r for r in rows if r.get('room') == 25788785 and 'after' in r), None)
+        if sui:
+            values = []
+            for kind, label in [('watchLive','观看'),('sendDanmu','弹幕'),('like','点赞'),('feedLight','灯牌')]:
+                value = sui['after'].get(kind)
+                values.append(label + ('/'.join(map(str,value)) if value else '未知'))
+            lines.append('岁己：' + '，'.join(values))
+            gift = sui.get('gift')
+            if gift == 'confirmed':
+                lines.append('本轮确认补送1个灯牌（最多1电池）')
+            elif gift in ('failed_or_uncertain_no_retry','sent_unconfirmed_no_retry'):
+                lines.append('灯牌结果未确认，当天不重试以免重复扣费')
+            elif str(uid) != str(primary_uid):
+                lines.append('此账号仅免费，不送灯牌')
+        failures = [r.get('reason', 'unknown') for r in rows if r.get('status') == 'error']
+        if failures:
+            lines.append('异常原因：' + '；'.join(dict.fromkeys(failures))[:160])
+    lines += ['', '“已满”按B站每日进度确认；每轮另轮换最多5个持牌主播，仅岁己允许主账号限额送礼。']
+    return [(f'{day}-round-{round_id}', '\n'.join(lines))]
 
 
-def report(settings, ledger, day, identities, results):
+def report(settings, ledger, day, identities, results, round_id=None):
     return [{'event': key, 'status': send_notice(settings, ledger, key, text)}
-            for key, text in events(day, identities, results, settings.get('PAID_ACCOUNT_UID'))]
+            for key, text in events(day, identities, results, settings.get('PAID_ACCOUNT_UID'), round_id)]

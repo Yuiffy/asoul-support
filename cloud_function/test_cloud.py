@@ -33,6 +33,7 @@ class Ledger:
 class GiftTests(unittest.TestCase):
     def client(self, data=None):
         client = Mock(uid=123)
+        client.watch_seconds = 0
         client.tasks.return_value = medal() if data is None else data
         return client
 
@@ -110,6 +111,7 @@ class ProtocolTests(unittest.TestCase):
         account = {'role': 'secondary', 'uid': 123, 'cookie': 'unused', 'allow_paid': True}
         settings = {'PAID_ACCOUNT_UID': '123', 'ENABLE_PAID_GIFT': 'true'}
         client = Mock(uid=123)
+        client.watch_seconds = 0
         data = medal()
         data['reach_free_intimacy_limit'] = True
         client.tasks.return_value = data
