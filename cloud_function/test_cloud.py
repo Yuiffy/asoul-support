@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import threading
 import unittest
@@ -92,6 +93,19 @@ class GiftTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_expired_secondary_does_not_block_primary(self):
+        accounts = [{'role': 'primary', 'uid': 123, 'cookie': 'one'},
+                    {'role': 'secondary', 'uid': 456, 'cookie': 'two'}]
+        good, bad = Mock(), Mock()
+        good.login.return_value = {'uid': 123}
+        good.tasks.return_value = medal()
+        bad.login.side_effect = cloud.TaskError('expired')
+        with patch.dict(os.environ, {'BILIBILI_ACCOUNTS_JSON': json.dumps(accounts)}), patch('index.Bili', side_effect=[good,bad]):
+            result = cloud.handler({'mode': 'inspect'}, None)
+        self.assertEqual(result['accounts'][0]['account']['uid'], 123)
+        self.assertIn('tasks', result['accounts'][0])
+        self.assertEqual(result['accounts'][1]['status'], 'error')
+
     def test_secondary_cannot_pay_even_if_misconfigured(self):
         account = {'role': 'secondary', 'uid': 123, 'cookie': 'unused', 'allow_paid': True}
         settings = {'PAID_ACCOUNT_UID': '123', 'ENABLE_PAID_GIFT': 'true'}

@@ -375,7 +375,8 @@ def run_room(account, room_id, uid, day, deadline, ledger, settings):
     if not data.get('reach_free_intimacy_limit'):
         data = free_actions(client, room_id, uid, data, day, deadline,
                             10 if uid == SUI_UID else 1, offline_only=(uid != SUI_UID))
-        data = watch(client, room_id, uid, data, day, deadline)
+        if uid == SUI_UID or account.get('_watch_with_primary') is True:
+            data = watch(client, room_id, uid, data, day, deadline)
     result = {'account': identity, 'room': room_id, 'before': before, 'after': summary(data),
               'gift': gift, 'storage_full': bool(data.get('reach_free_intimacy_limit'))}
     LOG.info('%s', compact(result))
@@ -403,17 +404,35 @@ def handler(event, context):
         if uid in seen:
             raise TaskError('Duplicate account UID')
         seen.add(uid)
-        client = Bili(account['cookie'], uid)
-        identity = client.login()
-        data = client.tasks(SUI_UID)
+        try:
+            client = Bili(account['cookie'], uid)
+            identity = client.login()
+            data = client.tasks(SUI_UID)
+        except TaskError as exc:
+            identities.append({'account': {'uid': uid}, 'status': 'error', 'reason': str(exc)})
+            LOG.warning('Account %s unavailable; other accounts continue', uid)
+            continue
         identities.append({'account': identity, 'tasks': summary(data),
                            'storage_full': bool(data.get('reach_free_intimacy_limit'))})
+        account = dict(account)
+        account['_watch_with_primary'] = False
+        if pending(data, 'watchLive') and not data.get('reach_free_intimacy_limit'):
+            try:
+                main_room = client.room(SUI_ROOM)
+                account['_watch_with_primary'] = (main_room.get('live_status') == 1
+                                                   and int(main_room.get('uid', 0)) == SUI_UID)
+            except TaskError:
+                pass
         targets.append((account, SUI_ROOM, SUI_UID))
         # Optional secondary rooms: existing medals only, explicit per-account enable, capped.
         if account.get('other_medals') is True:
             banned = {int(x) for x in account.get('banned_uids', [])}
-            others = [(room, anchor) for room, anchor in client.medal_rooms().items()
-                      if room != SUI_ROOM and anchor not in banned]
+            try:
+                others = [(room, anchor) for room, anchor in client.medal_rooms().items()
+                          if room != SUI_ROOM and anchor not in banned]
+            except TaskError:
+                LOG.warning('Optional medal enumeration failed for %s; primary room continues', uid)
+                others = []
             # Rotate pages so a large medal list is eventually covered.
             if others:
                 offset = (int(time.time()) // 1800 * 5) % len(others)
@@ -421,6 +440,8 @@ def handler(event, context):
             targets.extend((account, room, anchor) for room, anchor in others)
     if event.get('mode') == 'inspect' or settings.get('ENABLE_ACTIONS') != 'true':
         return {'status': 'inspection_only', 'accounts': identities}
+    if not targets:
+        return {'status': 'no_valid_accounts', 'accounts': identities}
     ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
     # Finish all workers before the next half-hour boundary, including delayed/retried events.
     slot_end = (int(time.time()) // 1800 + 1) * 1800 - 30

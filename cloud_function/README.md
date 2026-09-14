@@ -4,7 +4,9 @@ An asoul-support based Python 3.9+ cloud function for current Bilibili fans-club
 It reads daily task progress, completes remaining likes/danmaku and uses X25Kn E/X
 heartbeats while the streamer is live. Sui is the primary target. Other existing
 medals are optional, rotated five at a time, with one free interaction round and
-danmaku only while offline. No third-party notifications are sent.
+danmaku only while offline. Optional rooms are watched only when the account's
+Sui watch task still needs time and Sui is live, keeping them from extending the
+function into an all-day background worker. No third-party notifications are sent.
 
 ## Configuration and secrets
 
@@ -48,6 +50,18 @@ OBS stores only account/room identifiers, a day or slot, and reservation metadat
 not cookies. Records are immutable: a failed or ambiguous paid request is not retried
 that day. A retention rule of 30 days is sufficient; do not delete today's records.
 Each enabled room creates at most 48 small run records per day, plus one gift record.
+With two accounts and five optional rooms each, this is at most 17,856 tiny run
+records in a 31-day month, approximately 0.018 CNY in standard OBS PUT requests
+at Guangzhou's published 0.01 CNY per 10,000 requests, plus negligible storage.
+
+FunctionGraph's shared monthly free tier is 1,000,000 calls and 400,000 GB-seconds.
+At 128 MB, 150 minutes per day for 31 days is 34,875 GB-seconds. Two accounts
+run concurrently in one instance rather than doubling the memory allocation.
+The timer makes 1,488 calls in 31 days. Other functions share this allowance;
+actual billing depends on total account usage. OBS and paid Bilibili gifts are
+separate from FunctionGraph's free tier. No reserved instances or LTS are needed.
+Sources: [free tier](https://support.huaweicloud.com/price-functiongraph/functiongraph_00_0012.html),
+[pricing](https://www.huaweicloud.com/pricing/calculator.html?tab=detail#/obs).
 
 ## Paid-gift boundaries
 
