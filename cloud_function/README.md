@@ -10,28 +10,32 @@ Default run budget10800seconds; the handler also honors the actual cloud timeout
 Four-hour run reservations suppress duplicate invocations. The old half-hour
 trigger must be replaced if upgrading from the original five-room version.
 
-Two accounts run independently. Each enumerates its entire medal list, Sui first.
-Interaction work is serial within an account: one round for each room before up
-to nine further passes over remaining tasks. Sui watching runs alongside this
-sweep. Other live rooms then queue for up to16minutes watching each. At most two
-watch sessions per account run concurrently. Overall timeout, midnight or account
-risk control stops work, and uninspected/incomplete room counts appear in the
-final report. Completing a scan does not mean every room can reach daily caps.
-Subsequent executions read Bilibili's persisted progress and skip completed tasks.
-No local filesystem cursor is relied on.
+Two accounts run independently. Each enumerates its entire medal list, with Sui
+first even when a cached remaining queue is resumed. Sui gets all currently
+available interaction rounds and its watch session **before any other room is
+processed**. Offline-only danmaku still applies to Sui. If a task requires a live
+stream that is offline, it stays pending. Other rooms then get a fair serial
+interaction sweep and queued watch sessions. At most one watch session per account
+runs at a time. Overall timeout, midnight or risk stops work, with pending counts
+reported; completing a scan does not imply every room reached its daily caps.
 
-All account workers share a serialized request gate (minimum1.5seconds between
-requests, minimum30seconds between danmaku). All rooms, including Sui, receive danmaku only
-while offline. `-352`/`-412` stops the account for this execution; `-101` likewise
-stops an expired login. `10030` has no confirmed general meaning in the available
-evidence: disable its failing endpoint for the execution and report its endpoint,
-code and sanitized server message. Never bypass challenges or automatically retry
-POSTs. Gift daily restrictions remain unchanged.
+Pacing follows the inspected BLTH MedalModule/likeTask implementation for likes:
+a full API-specified round (normally30 clicks) is sent in **one** request, with
+**15–20seconds between like requests**, shared across all rooms for the account.
+The old10-click requests separated by3seconds are removed. Queries retain a slower
+**1.5–2second** shared gap than BLTH's300–800ms query delays. Danmaku retain a slower
+**30–40second** gap than BLTH's6–8seconds, and are sent only with an explicit offline
+status. Heartbeats retain the Bilibili server's interval. Cooldown waits release
+the account network lock. WBI signatures and danmaku timestamps are generated
+after all pacing waits, not before. These intervals are not an official guarantee
+against platform risk checks. No deliberate live risk-reproduction POSTs are used
+as deployment validation.
 
-Cost:186scheduled calls per31day month. At128MB, even10800seconds on every call
-uses251100GB-seconds, within the400000GB-second free tier **before other functions**.
-Actual work can exit sooner; other account workloads and OBS are billed separately.
-The final WeCom summary is deduplicated per four-hour run and per robot.
+`-352`/`-412` stops the account for this execution; `-101` likewise stops an expired
+login. `10030` disables the failing endpoint for the execution and reports its
+endpoint, code and sanitized message. No challenge bypass or automatic POST retries
+are used. Existing paid-gift limits, daily-cache policy and four-hour schedule are
+unchanged. This change does not add a persistent cross-run risk pause.
 
 ## Daily remaining queue (queue-v3)
 

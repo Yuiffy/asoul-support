@@ -12,6 +12,8 @@ import os
 import re
 import time
 import threading
+import random
+from contextlib import contextmanager
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +31,10 @@ SUI_UID = 1954091502
 LIVE = 'https://api.live.bilibili.com'
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 MIXIN = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13]
+LIKE_ENDPOINT = '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
+PACING = {'query_seconds': [1.5, 2.0], 'like_seconds': [15, 20],
+          'danmaku_seconds': [30, 40], 'heartbeat': 'server_interval',
+          'priority': 'sui_available_tasks_before_other_rooms'}
 
 
 class TaskError(RuntimeError):
@@ -50,6 +56,44 @@ class AccountGate:
         self.stopped = False
         self.risk_code = None
         self.disabled = set()
+        self.next_request = 0.0
+        self.next_action = {}
+
+    def wait_action(self, endpoint):
+        while True:
+            self.check(endpoint)
+            remaining = self.next_action.get(endpoint, 0) - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 1))
+
+    @contextmanager
+    def slot(self, endpoint):
+        # Release the network lock during cooldowns so heartbeats can proceed.
+        while True:
+            self.lock.acquire()
+            try:
+                self.check(endpoint)
+                now = time.monotonic()
+                delay = max(self.next_request, self.next_action.get(endpoint, 0)) - now
+                if delay <= 0:
+                    self.last = now
+                    self.next_request = now + random.uniform(*PACING['query_seconds'])
+                    if endpoint == LIKE_ENDPOINT:
+                        self.next_action[endpoint] = now + random.uniform(*PACING['like_seconds'])
+                    elif endpoint == '/msg/send':
+                        self.last_danmu = now
+                        self.next_action[endpoint] = now + random.uniform(*PACING['danmaku_seconds'])
+                    break
+            except BaseException:
+                self.lock.release()
+                raise
+            self.lock.release()
+            time.sleep(min(delay, 1))
+        try:
+            yield
+        finally:
+            self.lock.release()
 
     def check(self, endpoint):
         if self.stopped:
@@ -144,29 +188,14 @@ class Bili:
         endpoint = urllib.parse.urlsplit(url).path
         self.gate.check(endpoint)
         params = dict(params or {})
-        if signed:
-            if not self.salt:
-                raise TaskError('WBI key unavailable')
-            params['wts'] = int(time.time())
-            params = {k: re.sub(r"[!'()*]", '', str(v)) for k, v in params.items()}
-            query = urllib.parse.urlencode(sorted(params.items()), quote_via=urllib.parse.quote)
-            params['w_rid'] = hashlib.md5((query + self.salt).encode()).hexdigest()
-        if params:
-            url += '?' + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
+        form = dict(form or {})
         headers = {'User-Agent': UA, 'Cookie': self.cookie,
                    'Referer': f'https://live.bilibili.com/{SUI_ROOM}',
                    'Origin': 'https://live.bilibili.com'}
-        body = None
-        if method == 'POST':
-            body = urllib.parse.urlencode(form or {}).encode()
-            headers['Content-Type'] = 'application/x-www-form-urlencoded'
-        req = urllib.request.Request(url, data=body, headers=headers, method=method)
         # Wait for the account's danmaku cooldown outside the network lock so
         # a scheduled heartbeat is not blocked behind a 30-second chat wait.
         if endpoint == '/msg/send':
-            while self.gate.last_danmu + 30 > time.monotonic():
-                self.gate.check(endpoint)
-                time.sleep(min(1, self.gate.last_danmu + 30 - time.monotonic()))
+            self.gate.wait_action(endpoint)
             # A room may go live while this account waits in the queue/cooldown.
             # Require an explicit offline status immediately before any chat POST.
             room = self.room(int((form or {})['roomid']))
@@ -174,14 +203,23 @@ class Bili:
                 return {'_skipped_not_offline': True}
         # No automatic POST retries: a timeout may mean the server accepted it.
         try:
-            with self.gate.lock:
-                self.gate.check(endpoint)
-                delay = max(0, self.gate.last + 1.5 - time.monotonic())
-                if delay > 0:
-                    time.sleep(delay)
-                self.gate.last = time.monotonic()
-                if endpoint == '/msg/send':
-                    self.gate.last_danmu = self.gate.last
+            with self.gate.slot(endpoint):
+                # Sign after all pacing waits; never submit a pre-wait timestamp.
+                if signed:
+                    if not self.salt:
+                        raise TaskError('WBI key unavailable')
+                    params['wts'] = int(time.time())
+                    params = {k: re.sub(r"[!'()*]", '', str(v)) for k, v in params.items()}
+                    query = urllib.parse.urlencode(sorted(params.items()), quote_via=urllib.parse.quote)
+                    params['w_rid'] = hashlib.md5((query + self.salt).encode()).hexdigest()
+                target = url + ('?' + urllib.parse.urlencode(params, quote_via=urllib.parse.quote) if params else '')
+                body = None
+                if method == 'POST':
+                    if endpoint == '/msg/send':
+                        form['rnd'] = int(time.time())
+                    body = urllib.parse.urlencode(form).encode()
+                    headers['Content-Type'] = 'application/x-www-form-urlencoded'
+                req = urllib.request.Request(target, data=body, headers=headers, method=method)
                 with self.opener.open(req, timeout=15) as response:
                     result = json.load(response)
                 if result.get('code') != 0:
@@ -417,12 +455,9 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
                 match = re.search(r'(\d+)', item.get('title', ''))
                 if not match or not 1 <= int(match[1]) <= 60:
                     break
-                remaining = int(match[1])
-                while remaining > 0 and alive(day, deadline):
-                    count = min(10, remaining)
-                    client.like(room_id, uid, count)
-                    remaining -= count
-                    time.sleep(3)
+                # BLTH submits the API's full round count once (normally30).
+                # The account-wide gate enforces15–20s across rooms and passes.
+                client.like(room_id, uid, int(match[1]))
             else:
                 message = '岁己加油~' if uid == SUI_UID else '支持~'
                 if not client.danmu(room_id, message):
@@ -533,88 +568,80 @@ def run_account_queue(account, day, deadline, ledger, settings):
                 raise
 
         watch_targets = []
-        primary_future = None
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as watcher:
+        for room, uid in targets:
+            if gate.stopped or not alive(day, deadline):
+                break
+            before = {}
+            try:
+                data = client.tasks(uid)
+                before = summary(data)
+                gift = 'disabled_other_room'
+                if room == SUI_ROOM:
+                    paid = (account.get('role') == 'primary' and account.get('allow_paid') is True
+                            and str(client.uid) == settings.get('PAID_ACCOUNT_UID')
+                            and settings.get('ENABLE_PAID_GIFT') == 'true')
+                    try:
+                        gift = maybe_gift(client, ledger, paid, day)
+                    except TaskError as exc:
+                        gift = 'failed_or_uncertain_no_retry'
+                        if gate.stopped:
+                            raise
+                    data = client.tasks(uid)
+                row = {'account': identity, 'room': room, 'before': before, 'after': summary(data),
+                       'gift': gift, 'storage_full': bool(data.get('reach_free_intimacy_limit')), 'watch_seconds':0}
+                rows[room] = row
+                if row['storage_full']:
+                    checkpoint(room)
+                    continue
+                # Finish Sui available rounds first; other rooms get one fair initial round.
+                data = free_actions(client, room, uid, data, day, deadline, 10 if room == SUI_ROOM else 1)
+                row['after'] = summary(data)
+                if pending(data, 'watchLive') and client.room(room).get('live_status') == 1:
+                    if room == SUI_ROOM:
+                        update, seconds = queue_watch(account, gate, room, uid, data, day, deadline)
+                        row.update(after=merge_progress(row['after'], summary(update)), watch_seconds=seconds)
+                    else:
+                        watch_targets.append((room,uid,data))
+                checkpoint(room)
+            except TaskError as exc:
+                row = rows.get(room, queue_error(client, identity, room, before, exc))
+                row.update(status='error',reason=str(exc))
+                rows[room] = row
+                checkpoint(room)
+        metadata['pending_rooms'] = len(targets) - len(rows)
+        # Sweep remaining free rounds fairly; never retry a rejected room during this run.
+        for _ in range(9):
+            changed = False
             for room, uid in targets:
                 if gate.stopped or not alive(day, deadline):
                     break
-                before = {}
+                row = rows.get(room)
+                if room == SUI_ROOM or not row or row.get('status') == 'error' or row.get('storage_full'):
+                    continue
+                if not any(row['after'].get(k) and row['after'][k][0] < row['after'][k][1]
+                           for k in ('like','sendDanmu')):
+                    continue
                 try:
                     data = client.tasks(uid)
-                    before = summary(data)
-                    gift = 'disabled_other_room'
-                    if room == SUI_ROOM:
-                        paid = (account.get('role') == 'primary' and account.get('allow_paid') is True
-                                and str(client.uid) == settings.get('PAID_ACCOUNT_UID')
-                                and settings.get('ENABLE_PAID_GIFT') == 'true')
-                        try:
-                            gift = maybe_gift(client, ledger, paid, day)
-                        except TaskError as exc:
-                            gift = 'failed_or_uncertain_no_retry'
-                            if gate.stopped:
-                                raise
-                        data = client.tasks(uid)
-                    row = {'account': identity, 'room': room, 'before': before, 'after': summary(data),
-                           'gift': gift, 'storage_full': bool(data.get('reach_free_intimacy_limit')), 'watch_seconds':0}
-                    rows[room] = row
-                    if row['storage_full']:
-                        checkpoint(room)
-                        continue
-                    # One round per room first: the entire medal list is visited before repeats.
-                    data = free_actions(client, room, uid, data, day, deadline, 1)
-                    row['after'] = summary(data)
-                    if pending(data, 'watchLive') and client.room(room).get('live_status') == 1:
-                        if room == SUI_ROOM:
-                            primary_future = watcher.submit(queue_watch, account, gate, room, uid, data, day, deadline)
-                        else:
-                            watch_targets.append((room,uid,data))
+                    data = free_actions(client,room,uid,data,day,deadline,1)
+                    updated = summary(data)
+                    changed |= updated != row['after']
+                    row['after'] = updated
                     checkpoint(room)
                 except TaskError as exc:
-                    row = rows.get(room, queue_error(client, identity, room, before, exc))
                     row.update(status='error',reason=str(exc))
-                    rows[room] = row
-                    checkpoint(room)
-            metadata['pending_rooms'] = len(targets) - len(rows)
-            # Sweep remaining free rounds fairly; never retry a rejected room during this run.
-            for _ in range(9):
-                changed = False
-                for room, uid in targets:
-                    if gate.stopped or not alive(day, deadline):
-                        break
-                    row = rows.get(room)
-                    if not row or row.get('status') == 'error' or row.get('storage_full'):
-                        continue
-                    if not any(row['after'].get(k) and row['after'][k][0] < row['after'][k][1]
-                               for k in ('like','sendDanmu')):
-                        continue
-                    try:
-                        data = client.tasks(uid)
-                        data = free_actions(client,room,uid,data,day,deadline,1)
-                        updated = summary(data)
-                        changed |= updated != row['after']
-                        row['after'] = updated
-                        checkpoint(room)
-                    except TaskError as exc:
-                        row.update(status='error',reason=str(exc))
-                if not changed or gate.stopped or not alive(day,deadline):
-                    break
-            # Other watch rooms are queued, one at a time, alongside the Sui watch worker.
-            for room, uid, data in watch_targets:
-                if gate.stopped or not alive(day, deadline):
-                    break
-                try:
-                    update, seconds = queue_watch(account,gate,room,uid,data,day,deadline)
-                    rows[room].update(after=summary(update),watch_seconds=seconds)
-                    checkpoint(room)
-                except TaskError as exc:
-                    rows[room].update(status='error',reason=str(exc))
-            if primary_future:
-                try:
-                    update, seconds = primary_future.result()
-                    rows[SUI_ROOM].update(after=merge_progress(rows[SUI_ROOM]['after'], summary(update)),watch_seconds=seconds)
-                    checkpoint(SUI_ROOM)
-                except TaskError as exc:
-                    rows[SUI_ROOM].update(status='error',reason=str(exc))
+            if not changed or gate.stopped or not alive(day,deadline):
+                break
+        # Other watch rooms run one at a time after the Sui priority phase.
+        for room, uid, data in watch_targets:
+            if gate.stopped or not alive(day, deadline):
+                break
+            try:
+                update, seconds = queue_watch(account,gate,room,uid,data,day,deadline)
+                rows[room].update(after=summary(update),watch_seconds=seconds)
+                checkpoint(room)
+            except TaskError as exc:
+                rows[room].update(status='error',reason=str(exc))
         metadata['paused_by_risk'] = gate.risk_code in (-352, -412)
         metadata['incomplete_rooms'] = sum(not all(row.get('after',{}).get(k) and row['after'][k][0]>=row['after'][k][1]
                                                    for k in ('watchLive','sendDanmu','like')) for row in rows.values())
@@ -687,6 +714,7 @@ def handler(event, context):
         return {'status': 'ledger_verified', 'first_reserved': first, 'duplicate_blocked': not second}
     if event.get('mode') == 'health':
         return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v3',
+                'pacing': PACING,
                 'danmaku_policy': 'offline_only_all_rooms',
                 'actions_enabled': settings.get('ENABLE_ACTIONS') == 'true',
                 'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true',
