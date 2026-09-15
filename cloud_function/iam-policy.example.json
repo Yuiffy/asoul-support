@@ -1,0 +1,18 @@
+{
+  "Version": "1.1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["obs:object:PutObject"],
+      "Resource": [
+        "OBS:*:*:object:YOUR_PRIVATE_BUCKET/runs/*",
+        "OBS:*:*:object:YOUR_PRIVATE_BUCKET/gifts/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["obs:object:GetObject"],
+      "Resource": ["OBS:*:*:object:YOUR_PRIVATE_BUCKET/runs/daily/*"]
+    }
+  ]
+}

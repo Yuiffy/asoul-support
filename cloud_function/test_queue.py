@@ -4,6 +4,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 import index as cloud
+from test_cloud import Ledger
 
 
 class QueueTests(unittest.TestCase):
@@ -30,11 +31,11 @@ class QueueTests(unittest.TestCase):
     def test_entire_199_room_list_is_visited_without_five_room_slice(self):
         client=Mock(uid=123,watch_seconds=0)
         client.login.return_value={'uid':123,'name':'primary'}
-        rooms={cloud.SUI_ROOM:cloud.SUI_UID,**{r:1000+r for r in range(198)}}
+        rooms={cloud.SUI_ROOM:cloud.SUI_UID,**{r:1000+r for r in range(1,199)}}
         client.medal_rooms.return_value=rooms
         client.tasks.return_value={'task_info':[],'reach_free_intimacy_limit':True}
         with patch('index.Bili',return_value=client),patch('index.maybe_gift',return_value='disabled_for_account'):
-            meta,rows=cloud.run_account_queue({'uid':123,'cookie':'unused','other_medals':True},cloud.today(),time.monotonic()+60,Mock(),{})
+            meta,rows=cloud.run_account_queue({'uid':123,'cookie':'unused','other_medals':True},cloud.today(),time.monotonic()+60,Ledger(),{})
         self.assertEqual(len(rows),199)
         self.assertEqual(rows[0]['room'],cloud.SUI_ROOM)
         self.assertEqual(meta['pending_rooms'],0)
@@ -46,7 +47,7 @@ class QueueTests(unittest.TestCase):
         client.tasks.return_value=data
         account={'uid':123,'cookie':'unused'}
         with patch('index.Bili',return_value=client),patch('index.maybe_gift',return_value='already_done'),patch('index.free_actions',side_effect=cloud.ApiError(10030,'/msg/send','rejected')):
-            meta,rows=cloud.run_account_queue(account,cloud.today(),time.monotonic()+60,Mock(),{})
+            meta,rows=cloud.run_account_queue(account,cloud.today(),time.monotonic()+60,Ledger(),{})
         self.assertEqual(rows[0]['after']['watchLive'],[3,10])
         self.assertIn('/msg/send',rows[0]['reason'])
 
@@ -60,7 +61,7 @@ class QueueTests(unittest.TestCase):
             raise cloud.ApiError(-352,'/tasks','risk')
         client.tasks.side_effect=fail
         with patch('index.AccountGate',return_value=gate),patch('index.Bili',return_value=client):
-            meta,rows=cloud.run_account_queue({'uid':123,'cookie':'unused','other_medals':True},cloud.today(),time.monotonic()+60,Mock(),{})
+            meta,rows=cloud.run_account_queue({'uid':123,'cookie':'unused','other_medals':True},cloud.today(),time.monotonic()+60,Ledger(),{})
         self.assertEqual(len(rows),1)
         self.assertEqual(meta['pending_rooms'],2)
         self.assertTrue(meta['paused_by_risk'])

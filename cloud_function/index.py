@@ -19,6 +19,7 @@ import uuid
 
 from asoul_x25kn import enter, heartbeat
 from wecom_notify import report, send_notice
+from daily_progress import DailyProgress, ProgressError
 
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.INFO)
@@ -47,6 +48,7 @@ class AccountGate:
         self.last = 0.0
         self.last_danmu = 0.0
         self.stopped = False
+        self.risk_code = None
         self.disabled = set()
 
     def check(self, endpoint):
@@ -58,6 +60,7 @@ class AccountGate:
     def rejected(self, code, endpoint):
         if code in (-352, -412, -101):
             self.stopped = True
+            self.risk_code = code
         if code == 10030:
             self.disabled.add(endpoint)
 
@@ -102,6 +105,15 @@ def pending(data, kind):
 def summary(data):
     return {kind: (list(p[:2]) if (p := progress(data, kind)) else None)
             for kind in ('feedLight', 'watchLive', 'sendDanmu', 'like')}
+
+
+def merge_progress(previous, current):
+    merged = current.copy()
+    for key, old in previous.items():
+        new = current.get(key)
+        if old and new and old[1] == new[1]:
+            merged[key] = [max(old[0], new[0]), new[1]]
+    return merged
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -288,6 +300,48 @@ class ObsLedger:
         except Exception as exc:
             raise TaskError('OBS reservation uncertain: ' + type(exc).__name__) from None
 
+    def _progress_request(self, key, method='GET', data=None, position=None):
+        if not key.startswith('runs/daily/') or not re.fullmatch(r'[A-Za-z0-9_./-]+', key) or '..' in key:
+            raise ProgressError('Invalid daily progress key')
+        ak = self.context.getSecurityAccessKey()
+        sk = self.context.getSecuritySecretKey()
+        token = self.context.getSecurityToken()
+        if not all((ak, sk, token)):
+            raise ProgressError('Function execution agency credentials unavailable')
+        date = email.utils.formatdate(usegmt=True)
+        content_type = 'application/x-ndjson' if method == 'POST' else ''
+        suffix = f'?append&position={position}' if method == 'POST' else ''
+        resource = f'/{self.bucket}/{key}{suffix}'
+        canonical = f'{method}\n\n{content_type}\n{date}\nx-obs-security-token:{token}\n{resource}'
+        signature = base64.b64encode(hmac.new(sk.encode(), canonical.encode(), hashlib.sha1).digest()).decode()
+        headers = {'Date': date, 'x-obs-security-token': token, 'Authorization': f'OBS {ak}:{signature}'}
+        if content_type:
+            headers['Content-Type'] = content_type
+        req = urllib.request.Request(f'https://{self.bucket}.obs.cn-south-1.myhuaweicloud.com/{key}{suffix}',
+                                     data=data, headers=headers, method=method)
+        try:
+            with self.opener.open(req, timeout=15) as response:
+                if response.status != 200:
+                    raise ProgressError('OBS daily progress response rejected')
+                body = response.read(2 * 1024 * 1024 + 1)
+                if len(body) > 2 * 1024 * 1024:
+                    raise ProgressError('OBS daily journal exceeds size limit')
+                return body
+        except urllib.error.HTTPError as exc:
+            if method == 'GET' and exc.code == 404:
+                return None
+            raise ProgressError('OBS daily progress HTTP ' + str(exc.code)) from None
+        except ProgressError:
+            raise
+        except Exception as exc:
+            raise ProgressError('OBS daily progress request failed: ' + type(exc).__name__) from None
+
+    def read_progress(self, key):
+        return self._progress_request(key)
+
+    def append_progress(self, key, data, position):
+        self._progress_request(key, 'POST', data, position)
+
 
 def maybe_gift(client, ledger, allow_paid, run_day):
     if not allow_paid:
@@ -431,15 +485,37 @@ def run_account_queue(account, day, deadline, ledger, settings):
     identity = {'uid': account['uid']}
     metadata = {'account': identity, 'pending_rooms': 0}
     rows = {}
+    daily = None
     try:
+        daily = DailyProgress(ledger, account, settings, day)
+        if daily.header:
+            identity = daily.header['identity']
+            metadata.update(account=identity, medal_rooms_total=daily.header['medal_rooms_total'],
+                            eligible_rooms=len(daily.header['targets']), cached_completed_rooms=len(daily.done),
+                            queue_source='daily_remaining')
+            if not daily.remaining():
+                metadata.update(status='daily_complete', daily_completed_rooms=len(daily.done),
+                                remaining_rooms=0, incomplete_rooms=0)
+                return metadata, []
         client = Bili(account['cookie'], account['uid'], gate)
         identity = client.login()
         metadata['account'] = identity
-        medals = client.medal_rooms() if account.get('other_medals') else {SUI_ROOM: SUI_UID}
-        banned = {int(x) for x in account.get('banned_uids', [])}
-        targets = [(SUI_ROOM, SUI_UID)] + [(r,u) for r,u in medals.items() if r != SUI_ROOM and u not in banned]
-        metadata['medal_rooms_total'] = len(medals)
-        metadata['eligible_rooms'] = len(targets)
+        if daily.header is None:
+            medals = client.medal_rooms() if account.get('other_medals') else {SUI_ROOM: SUI_UID}
+            banned = {int(x) for x in account.get('banned_uids', [])}
+            roster = [(SUI_ROOM, SUI_UID)] + [(r,u) for r,u in medals.items() if r != SUI_ROOM and u not in banned]
+            daily.initialize(identity, roster, len(medals))
+            metadata.update(medal_rooms_total=len(medals), eligible_rooms=len(roster),
+                            cached_completed_rooms=0, queue_source='daily_full')
+        targets = daily.remaining()
+
+        def checkpoint(room):
+            try:
+                daily.record(room, rows[room], today())
+            except ProgressError:
+                gate.stopped = True
+                raise
+
         watch_targets = []
         primary_future = None
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as watcher:
@@ -466,6 +542,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                            'gift': gift, 'storage_full': bool(data.get('reach_free_intimacy_limit')), 'watch_seconds':0}
                     rows[room] = row
                     if row['storage_full']:
+                        checkpoint(room)
                         continue
                     # One round per room first: the entire medal list is visited before repeats.
                     data = free_actions(client, room, uid, data, day, deadline, 1, offline_only=(uid != SUI_UID))
@@ -475,10 +552,12 @@ def run_account_queue(account, day, deadline, ledger, settings):
                             primary_future = watcher.submit(queue_watch, account, gate, room, uid, data, day, deadline)
                         else:
                             watch_targets.append((room,uid,data))
+                    checkpoint(room)
                 except TaskError as exc:
                     row = rows.get(room, queue_error(client, identity, room, before, exc))
                     row.update(status='error',reason=str(exc))
                     rows[room] = row
+                    checkpoint(room)
             metadata['pending_rooms'] = len(targets) - len(rows)
             # Sweep remaining free rounds fairly; never retry a rejected room during this run.
             for _ in range(9):
@@ -498,6 +577,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                         updated = summary(data)
                         changed |= updated != row['after']
                         row['after'] = updated
+                        checkpoint(room)
                     except TaskError as exc:
                         row.update(status='error',reason=str(exc))
                 if not changed or gate.stopped or not alive(day,deadline):
@@ -509,21 +589,25 @@ def run_account_queue(account, day, deadline, ledger, settings):
                 try:
                     update, seconds = queue_watch(account,gate,room,uid,data,day,deadline)
                     rows[room].update(after=summary(update),watch_seconds=seconds)
+                    checkpoint(room)
                 except TaskError as exc:
                     rows[room].update(status='error',reason=str(exc))
             if primary_future:
                 try:
                     update, seconds = primary_future.result()
-                    rows[SUI_ROOM].update(after=summary(update),watch_seconds=seconds)
+                    rows[SUI_ROOM].update(after=merge_progress(rows[SUI_ROOM]['after'], summary(update)),watch_seconds=seconds)
+                    checkpoint(SUI_ROOM)
                 except TaskError as exc:
                     rows[SUI_ROOM].update(status='error',reason=str(exc))
-        metadata['paused_by_risk'] = gate.stopped
+        metadata['paused_by_risk'] = gate.risk_code in (-352, -412)
         metadata['incomplete_rooms'] = sum(not all(row.get('after',{}).get(k) and row['after'][k][0]>=row['after'][k][1]
                                                    for k in ('watchLive','sendDanmu','like')) for row in rows.values())
-    except TaskError as exc:
-        metadata.update(status='error',reason=str(exc),paused_by_risk=gate.stopped)
+    except (TaskError, ProgressError) as exc:
+        metadata.update(status='error',reason=str(exc),paused_by_risk=gate.risk_code in (-352, -412))
     except Exception as exc:
         metadata.update(status='error',reason=type(exc).__name__)
+    if daily is not None and daily.header is not None:
+        metadata.update(daily_completed_rooms=len(daily.done), remaining_rooms=len(daily.remaining()))
     return metadata, list(rows.values())
 
 
@@ -539,6 +623,25 @@ def queue_watch(account, gate, room, uid, data, day, deadline):
 def handler(event, context):
     event = event if isinstance(event, dict) else {}
     settings = settings_from(context)
+    if event.get('mode') == 'progress_check':
+        ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
+        probe = {'uid': int(uuid.uuid4().hex[:14], 16), 'role': 'secondary'}
+        first = DailyProgress(ledger, probe, {}, today())
+        first.initialize({'uid': probe['uid'], 'name': 'progress-check'}, [(1, 2)], 1)
+        first.record(1, {'after': {k:[10,10] for k in ('watchLive','sendDanmu','like')}}, today())
+        resumed = DailyProgress(ledger, probe, {}, today())
+        if resumed.remaining() or len(resumed.done) != 1:
+            raise ProgressError('Daily progress read-back failed')
+        return {'status': 'daily_progress_verified', 'cached_completed_rooms': 1, 'remaining_rooms': 0}
+    if event.get('mode') == 'progress_state':
+        ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
+        accounts = json.loads(settings.get('BILIBILI_ACCOUNTS_JSON') or '[]')
+        result = []
+        for account in accounts:
+            state = DailyProgress(ledger, account, settings, today())
+            result.append({'uid': account['uid'], 'initialized': state.header is not None,
+                           'completed': len(state.done), 'remaining': len(state.remaining()) if state.header else None})
+        return {'version': 'queue-v3', 'day': today(), 'accounts': result}
     if event.get('mode') == 'notify_test':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
         status = send_notice(settings, ledger, today() + '-test-summary-v2',
@@ -553,7 +656,7 @@ def handler(event, context):
             raise TaskError('Durable reservation check failed')
         return {'status': 'ledger_verified', 'first_reserved': first, 'duplicate_blocked': not second}
     if event.get('mode') == 'health':
-        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v2',
+        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v3',
                 'actions_enabled': settings.get('ENABLE_ACTIONS') == 'true',
                 'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true',
                 'wecom_configured': bool(settings.get('WECOM_WEBHOOK_URL'))}
@@ -575,7 +678,7 @@ def handler(event, context):
                                    'storage_full': bool(data.get('reach_free_intimacy_limit'))})
             except TaskError as exc:
                 identities.append({'account': {'uid': account['uid']}, 'status': 'error', 'reason': str(exc)})
-        return {'status': 'inspection_only', 'version': 'queue-v2', 'accounts': identities}
+        return {'status': 'inspection_only', 'version': 'queue-v3', 'accounts': identities}
     if len({int(a['uid']) for a in accounts}) != len(accounts):
         raise TaskError('Duplicate account UID')
     requested = event.get('max_seconds', 10800)
@@ -587,7 +690,7 @@ def handler(event, context):
     day, round_id = today(), int(time.time()) // 14400
     ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
     if not ledger.reserve(f'runs/queue-v2/{round_id}.json', {'day': day}):
-        return {'status': 'duplicate_run', 'version': 'queue-v2'}
+        return {'status': 'duplicate_run', 'version': 'queue-v3'}
     identities, results = [], []
     deadline = time.monotonic() + requested
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -596,5 +699,5 @@ def handler(event, context):
             identity, rows = future.result()
             identities.append(identity)
             results.extend(rows)
-    return {'status': 'finished', 'version': 'queue-v2', 'day': day, 'accounts': identities,
+    return {'status': 'finished', 'version': 'queue-v3', 'day': day, 'accounts': identities,
             'results': results, 'notifications': report(settings, ledger, day, identities, results, round_id)}

@@ -19,7 +19,17 @@ def medal(current=0, done=False, price=100):
 class Ledger:
     def __init__(self):
         self.keys = set()
+        self.journals = {}
         self.lock = threading.Lock()
+
+    def read_progress(self, key):
+        return self.journals.get(key)
+
+    def append_progress(self, key, data, position):
+        previous = self.journals.get(key, b'')
+        if len(previous) != position:
+            raise RuntimeError('position mismatch')
+        self.journals[key] = previous + data
 
     def reserve(self, key, value):
         with self.lock:

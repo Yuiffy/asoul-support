@@ -71,9 +71,11 @@ def events(day, identities, results, primary_uid, round_id=None):
         total = identity.get('medal_rooms_total')
         coverage = f'{len(rows)}/{total}' if total is not None else str(len(rows))
         lines += ['', str(name) + f'：本轮覆盖{coverage}个持牌直播间',
-                  f'免费日任务已满{full}间；本轮有进展{improved}间',
+                  f'本轮确认免费日任务已满{full}间；本轮有进展{improved}间',
                   f'储蓄满跳过{storage}间；重复跳过{duplicate}间；异常{errors}间',
                   f'已接受观看心跳：{seconds}秒']
+        if 'cached_completed_rooms' in identity:
+            lines.append(f'今日累计完成{identity.get("daily_completed_rooms",0)}间；已完成直接跳过{identity["cached_completed_rooms"]}间；剩余队列{identity.get("remaining_rooms",0)}间')
         lines.append(f'尚未检查{identity.get("pending_rooms",0)}间；已检查但未满{identity.get("incomplete_rooms",0)}间')
         if identity.get('paused_by_risk'):
             lines.append('账号触发风控，本次队列已暂停，未继续重试。')
@@ -94,7 +96,7 @@ def events(day, identities, results, primary_uid, round_id=None):
         failures = [r.get('reason', 'unknown') for r in rows if r.get('status') == 'error']
         if failures:
             lines.append('异常原因：' + '；'.join(dict.fromkeys(failures))[:160])
-    lines += ['', '每4小时启动全量队列，岁己优先；其他主播仅免费，先遍历全部房间再补余下轮次。已满以B站实际进度为准。']
+    lines += ['', '每4小时续跑当天剩余队列；首次建立全量列表，已完成当日不重查，跨天重置。岁己优先；其他主播仅免费。']
     return [(f'{day}-round-{round_id}', '\n'.join(lines))]
 
 

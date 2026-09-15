@@ -1,14 +1,14 @@
-# Huawei FunctionGraph adapter — queue-v2
+# Huawei FunctionGraph adapter — queue-v3
 
 An asoul-support based Python cloud function with a full medal-room queue.
 
-## Queue-v2 deployment (replaces the previous half-hour/five-room schedule)
+## Deployment (four-hour schedule retained)
 
 Set Timer cron `0 0 */4 * * ?` (every four hours), timeout **10900 seconds**,
 128MB memory, maximum instances1, request concurrency1, and no reserved instances.
 Default run budget10800seconds; the handler also honors the actual cloud timeout.
 Four-hour run reservations suppress duplicate invocations. The old half-hour
-trigger must be replaced when deploying this version.
+trigger must be replaced if upgrading from the original five-room version.
 
 Two accounts run independently. Each enumerates its entire medal list, Sui first.
 Interaction work is serial within an account: one round for each room before up
@@ -32,6 +32,42 @@ Cost:186scheduled calls per31day month. At128MB, even10800seconds on every call
 uses251100GB-seconds, within the400000GB-second free tier **before other functions**.
 Actual work can exit sooner; other account workloads and OBS are billed separately.
 The final WeCom summary is deduplicated per four-hour run and per robot.
+
+## Daily remaining queue (queue-v3)
+
+At the first execution of each Beijing calendar day, each account snapshots its
+eligible medal-room roster. Every verified room completion is immediately appended
+to an OBS journal under `runs/daily/<account>/<date>-<policy-hash>.jsonl`. Later
+executions read that journal once, skip the completed rooms without any Bilibili
+requests, and resume the remaining queue. Sui stays first; previously unvisited
+rooms precede rooms already inspected but still incomplete. If the entire account
+queue is complete, no Bilibili login or API request is made for that account.
+
+Only all three free tasks at their verified daily caps count as complete. The paid
+primary Sui target additionally requires `feedLight` at1/1. Offline, storage-full,
+unknown-progress, rejected and failed rooms remain pending. Existing gift reservations
+are separate and are never cleared by the daily queue. Next day starts a fresh roster.
+New medals acquired mid-day are discovered the next day. Changes to account scope,
+blacklist or paid-gift policy start a new matching roster; changing only the cookie
+keeps today's progress. No cookies/webhook keys are stored in the journal.
+
+Journal appends use the current byte position. A stale writer or uncertain append
+stops the queue; a fresh invocation reloads and reconciles persisted records. A
+corrupt journal or403 permission error is not treated as an empty roster. A worker
+that exits unexpectedly retains all previous successful checkpoints. The first
+queue-v3 run cannot reconstruct old queue-v2 completion records, so it performs
+one full scan to establish today's state.
+
+**Additional required permission before uploading queue-v3:** allow
+`obs:object:GetObject` on **only** the dedicated bucket's `runs/daily/*` prefix.
+Existing PutObject permissions for `runs/*` and `gifts/*` remain as-is; no ListBucket
+or DeleteObject is required. See `iam-policy.example.json`. Keep code/public config
+separate from real credentials.
+
+Test `{"mode":"progress_check"}` to append and read back a synthetic progress record
+without touching Bilibili, then `{"mode":"progress_state"}` to inspect actual cached
+counts without making Bilibili requests. The latter returns uninitialized until
+an actual queue-v3 run creates today's roster.
 
 ## Configuration and secrets
 
@@ -59,9 +95,9 @@ mismatch stop the affected account. Renew a cookie when the Bilibili login expir
 3. Use 128 MB memory, 10900 seconds timeout, one concurrent instance and one
    concurrent request per instance. Keep reserved instances at zero.
 4. Use a private standard OBS bucket with versioning off. Grant the function
-   execution agency only `obs:object:PutObject` for this bucket's `runs/*` and
+   execution agency `obs:object:PutObject` for this bucket's `runs/*` and
    `gifts/*` prefixes. AppendObject at `position=0` is the atomic reservation.
-   No Get/List/Delete permissions or permanent cloud access keys are needed.
+   Add GetObject only for `runs/daily/*`; no List/Delete permissions or permanent cloud access keys are needed.
 5. Create a Timer trigger every four hours. Start with actions disabled, test
    `{"mode":"health"}`, then `{"mode":"inspect"}` with account credentials.
 6. Enable free actions after inspection. Enable the paid switch only after
@@ -75,14 +111,14 @@ completion is not guaranteed. The function never bypasses risk-control challenge
 OBS stores only account/room identifiers, a day or slot, and reservation metadata,
 not cookies. Records are immutable: a failed or ambiguous paid request is not retried
 that day. A retention rule of 30 days is sufficient; do not delete today's records.
-Each enabled room creates at most 48 small run records per day, plus one gift record.
+Each enabled room creates at most 48 small run records per day, plus one gift record. Daily journals add a small append per changed checkpoint and one GET per account/run.
 ## WeCom notifications
 
 Each real execution sends one final aggregate report across all processed rooms,
 separated by account: covered rooms, total medal-room count when available,
 verified daily free-task completion, confirmed progress, storage-full skips,
 duplicate skips, errors, and accepted watch-heartbeat seconds. Sui's exact task
-progress and lamp result follow the totals. Inspection-only calls send no summary.
+progress and lamp result follow the totals, with cumulative daily completions, cache skips and remaining-queue counts. Inspection-only calls send no summary.
 A durable OBS reservation permits only one report attempt per four-hour slot and
 robot destination; uncertain HTTP outcomes are not blindly retried.
 Only `qyapi.weixin.qq.com/cgi-bin/webhook/send` HTTPS URLs are accepted. Webhook keys
