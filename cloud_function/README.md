@@ -53,7 +53,11 @@ keeps today's progress. No cookies/webhook keys are stored in the journal.
 
 Journal appends use the current byte position. A stale writer or uncertain append
 stops the queue; a fresh invocation reloads and reconciles persisted records. A
-corrupt journal or403 permission error is not treated as an empty roster. A worker
+corrupt journal is never treated as an empty roster. OBS returns403 for nonexistent
+objects when ListBucket is absent. On403, the reader atomically creates only a
+missing journal using a position-zero initialization marker, then requires a
+successful GET. Existing journals cannot be overwritten; a persistent403 still
+stops the queue. No ListBucket privilege is needed. A worker
 that exits unexpectedly retains all previous successful checkpoints. The first
 queue-v3 run cannot reconstruct old queue-v2 completion records, so it performs
 one full scan to establish today's state.
@@ -153,3 +157,7 @@ free tasks are skipped; a free-only secondary account never buys a gift to clear
 Run `python -m unittest discover -s cloud_function -p 'test_*.py'` from the fork.
 Tests include the upstream HMAC vector, already-gifted days, unexpected prices,
 concurrent runs, uncertain requests, day rollover, and absent account credentials.
+
+`progress_diagnose` compares existing and missing-object reads using synthetic
+records only. Reads of missing progress may create a small init marker; no real
+account tasks or gift reservations are changed.

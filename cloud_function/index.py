@@ -337,7 +337,16 @@ class ObsLedger:
             raise ProgressError('OBS daily progress request failed: ' + type(exc).__name__) from None
 
     def read_progress(self, key):
-        return self._progress_request(key)
+        try:
+            return self._progress_request(key)
+        except ProgressError as exc:
+            if str(exc) != 'OBS daily progress HTTP 403':
+                raise
+            # OBS conceals a missing key with403 when ListBucket is absent.
+            # Position-zero append creates only a missing object; an existing
+            # journal conflicts and is left intact. A second GET must succeed.
+            self.reserve(key, {'type': 'init', 'schema': 1})
+            return self._progress_request(key)
 
     def append_progress(self, key, data, position):
         self._progress_request(key, 'POST', data, position)
@@ -623,6 +632,20 @@ def queue_watch(account, gate, room, uid, data, day, deadline):
 def handler(event, context):
     event = event if isinstance(event, dict) else {}
     settings = settings_from(context)
+    if event.get('mode') == 'progress_diagnose':
+        ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
+        prefix = 'runs/daily/_probe/' + uuid.uuid4().hex
+        ledger.append_progress(prefix + '.jsonl', b'{"probe":true}\n', 0)
+        result = {'existing_read': False}
+        try:
+            result['existing_read'] = ledger.read_progress(prefix + '.jsonl') == b'{"probe":true}\n'
+        except ProgressError as exc:
+            result['existing_error'] = str(exc)
+        try:
+            result['missing_is_none'] = ledger.read_progress(prefix + '-missing.jsonl') is None
+        except ProgressError as exc:
+            result['missing_error'] = str(exc)
+        return result
     if event.get('mode') == 'progress_check':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
         probe = {'uid': int(uuid.uuid4().hex[:14], 16), 'role': 'secondary'}

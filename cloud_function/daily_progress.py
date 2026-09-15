@@ -45,6 +45,11 @@ class DailyProgress:
             if not isinstance(raw, bytes) or not raw or not raw.endswith(b'\n'):
                 raise ValueError('Incomplete journal')
             records = [json.loads(line) for line in raw.splitlines()]
+            self.position = len(raw)
+            if records[0] == {'type': 'init', 'schema': 1}:
+                records = records[1:]
+                if not records:
+                    return
             header = records[0]
             if (header.get('schema') != 1 or header.get('type') != 'roster'
                     or header.get('day') != day or header.get('policy') != self.policy

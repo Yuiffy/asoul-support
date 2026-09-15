@@ -24,8 +24,32 @@ class DailyProgressTests(unittest.TestCase):
         ledger.opener.open = Mock(side_effect=urllib.error.HTTPError('https://example.invalid',404,'missing',{},None))
         self.assertIsNone(ledger.read_progress(key))
         ledger.opener.open.side_effect = urllib.error.HTTPError('https://example.invalid',403,'denied',{},None)
+        ledger.reserve = Mock(return_value=False)
         with self.assertRaisesRegex(ProgressError, '403'):
             ledger.read_progress(key)
+
+    def test_missing_object_403_uses_create_only_marker_and_then_reads(self):
+        ledger = cloud.ObsLedger(Mock(), 'test-daily-bucket')
+        marker = b'{"type":"init","schema":1}\n'
+        ledger._progress_request = Mock(side_effect=[ProgressError('OBS daily progress HTTP 403'), marker])
+        ledger.reserve = Mock(return_value=True)
+        self.assertEqual(ledger.read_progress('runs/daily/123/day.jsonl'), marker)
+        ledger.reserve.assert_called_once_with('runs/daily/123/day.jsonl', {'type':'init','schema':1})
+
+    def test_init_marker_keeps_correct_append_offset(self):
+        ledger = Ledger()
+        state = DailyProgress(ledger, ACCOUNT, {}, DAY)
+        ledger.journals[state.key] = b'{"type":"init","schema":1}\n'
+        state = self.create(ledger=ledger)
+        state.record(1, {'after': FULL}, DAY)
+        resumed = DailyProgress(ledger, ACCOUNT, {}, DAY)
+        self.assertIn(1, resumed.done)
+
+    def test_existing_journal_403_never_overwrites_it(self):
+        ledger = cloud.ObsLedger(Mock(), 'test-daily-bucket')
+        ledger._progress_request = Mock(side_effect=[ProgressError('OBS daily progress HTTP 403'), b'existing'])
+        ledger.reserve = Mock(return_value=False)
+        self.assertEqual(ledger.read_progress('runs/daily/123/day.jsonl'), b'existing')
 
     def create(self, ledger=None, account=None, settings=None, day=DAY):
         state = DailyProgress(ledger or Ledger(), account or ACCOUNT, settings or {}, day)
