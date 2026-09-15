@@ -167,6 +167,11 @@ class Bili:
             while self.gate.last_danmu + 30 > time.monotonic():
                 self.gate.check(endpoint)
                 time.sleep(min(1, self.gate.last_danmu + 30 - time.monotonic()))
+            # A room may go live while this account waits in the queue/cooldown.
+            # Require an explicit offline status immediately before any chat POST.
+            room = self.room(int((form or {})['roomid']))
+            if room.get('live_status') != 0:
+                return {'_skipped_not_offline': True}
         # No automatic POST retries: a timeout may mean the server accepted it.
         try:
             with self.gate.lock:
@@ -237,11 +242,12 @@ class Bili:
 
     def danmu(self, room_id, message):
         self.gate.check('/msg/send')
-        return self.request(LIVE + '/msg/send', {'web_location': '444.8'}, 'POST', True,
+        result = self.request(LIVE + '/msg/send', {'web_location': '444.8'}, 'POST', True,
                             {'msg': message, 'roomid': room_id, 'bubble': 0, 'color': 16777215,
                              'mode': 1, 'room_type': 0, 'fontsize': 25, 'rnd': int(time.time()),
                              'csrf': self.csrf, 'csrf_token': self.csrf,
                              'statistics': '{"appId":100,"platform":5}'})
+        return result.get('_skipped_not_offline') is not True
 
     def trace(self, action, form):
         return self.request('https://live-trace.bilibili.com/xlive/data-interface/v1/x25Kn/' + action,
@@ -391,7 +397,7 @@ def alive(day, deadline):
     return today() == day and time.monotonic() < deadline
 
 
-def free_actions(client, room_id, uid, data, day, deadline, max_rounds, offline_only):
+def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
     for kind in ('like', 'sendDanmu'):
         endpoint = '/msg/send' if kind == 'sendDanmu' else '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
         if endpoint in client.gate.disabled:
@@ -403,7 +409,7 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds, offline_
             live = room.get('live_status') == 1
             if int(room.get('uid', 0)) != uid:
                 raise TaskError('Room owner mismatch')
-            if (kind == 'like' and not live) or (kind == 'sendDanmu' and live and offline_only):
+            if (kind == 'like' and not live) or (kind == 'sendDanmu' and room.get('live_status') != 0):
                 break
             before = progress(data, kind)[0]
             if kind == 'like':
@@ -419,7 +425,8 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds, offline_
                     time.sleep(3)
             else:
                 message = '岁己加油~' if uid == SUI_UID else '支持~'
-                client.danmu(room_id, message)
+                if not client.danmu(room_id, message):
+                    break
             time.sleep(10)
             data = client.tasks(uid)
             if not progress(data, kind) or progress(data, kind)[0] <= before:
@@ -554,7 +561,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                         checkpoint(room)
                         continue
                     # One round per room first: the entire medal list is visited before repeats.
-                    data = free_actions(client, room, uid, data, day, deadline, 1, offline_only=(uid != SUI_UID))
+                    data = free_actions(client, room, uid, data, day, deadline, 1)
                     row['after'] = summary(data)
                     if pending(data, 'watchLive') and client.room(room).get('live_status') == 1:
                         if room == SUI_ROOM:
@@ -582,7 +589,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                         continue
                     try:
                         data = client.tasks(uid)
-                        data = free_actions(client,room,uid,data,day,deadline,1,offline_only=(uid != SUI_UID))
+                        data = free_actions(client,room,uid,data,day,deadline,1)
                         updated = summary(data)
                         changed |= updated != row['after']
                         row['after'] = updated
@@ -680,6 +687,7 @@ def handler(event, context):
         return {'status': 'ledger_verified', 'first_reserved': first, 'duplicate_blocked': not second}
     if event.get('mode') == 'health':
         return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v3',
+                'danmaku_policy': 'offline_only_all_rooms',
                 'actions_enabled': settings.get('ENABLE_ACTIONS') == 'true',
                 'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true',
                 'wecom_configured': bool(settings.get('WECOM_WEBHOOK_URL'))}

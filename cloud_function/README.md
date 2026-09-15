@@ -21,7 +21,7 @@ Subsequent executions read Bilibili's persisted progress and skip completed task
 No local filesystem cursor is relied on.
 
 All account workers share a serialized request gate (minimum1.5seconds between
-requests, minimum30seconds between danmaku). Other rooms receive danmaku only
+requests, minimum30seconds between danmaku). All rooms, including Sui, receive danmaku only
 while offline. `-352`/`-412` stops the account for this execution; `-101` likewise
 stops an expired login. `10030` has no confirmed general meaning in the available
 evidence: disable its failing endpoint for the execution and report its endpoint,
@@ -161,3 +161,13 @@ concurrent runs, uncertain requests, day rollover, and absent account credential
 `progress_diagnose` compares existing and missing-object reads using synthetic
 records only. Reads of missing progress may create a small init marker; no real
 account tasks or gift reservations are changed.
+
+## Do not disturb live streams
+
+Automatic danmaku requires live_status=0 for **every** room and account, including
+Sui. Live, replay and unknown status skip danmaku and keep the task pending. The
+status is checked again after the account cooldown before sending. Status lookup
+failures never send. There is no live-room exception or option to bypass this rule.
+Likes, watch heartbeats and the explicitly allowed daily lamp retain their rules.
+A streamer can technically go live between the final status check and server
+acceptance; Bilibili provides no atomic offline-only send operation.
