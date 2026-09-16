@@ -120,10 +120,31 @@ def today():
 
 def settings_from(context):
     settings = {}
-    for key in ('BILIBILI_ACCOUNTS_JSON', 'ENABLE_ACTIONS', 'ENABLE_PAID_GIFT', 'PAID_ACCOUNT_UID', 'OBS_BUCKET', 'WECOM_WEBHOOK_URL'):
+    for key in ('BILIBILI_ACCOUNTS_JSON', 'ENABLE_ACTIONS', 'ENABLE_PAID_GIFT', 'PAID_ACCOUNT_UID',
+                'OBS_BUCKET', 'WECOM_WEBHOOK_URL', 'ACTIVE_ACCOUNT_UIDS', 'SUI_ONLY'):
         value = context.getUserData(key) if context is not None and hasattr(context, 'getUserData') else None
         settings[key] = value if value is not None else os.environ.get(key, '')
     return settings
+
+
+def active_accounts(settings):
+    """Apply nonsecret scope overrides before touching account APIs or journals."""
+    accounts = json.loads(settings.get('BILIBILI_ACCOUNTS_JSON') or '[]')
+    if not isinstance(accounts, list) or len(accounts) > 2 or any(not isinstance(a, dict) for a in accounts):
+        raise TaskError('Expected one or two explicitly configured accounts')
+    allowlist = settings.get('ACTIVE_ACCOUNT_UIDS', '').strip()
+    if allowlist:
+        parts = [part.strip() for part in allowlist.split(',')]
+        if any(not part.isascii() or not part.isdigit() or int(part) <= 0 for part in parts):
+            raise TaskError('ACTIVE_ACCOUNT_UIDS must contain comma-separated positive UIDs')
+        allowed = {int(part) for part in parts}
+        accounts = [a for a in accounts if int(a['uid']) in allowed]
+        if {int(a['uid']) for a in accounts} != allowed:
+            raise TaskError('ACTIVE_ACCOUNT_UIDS includes an unconfigured account')
+    sui_only = settings.get('SUI_ONLY', '').strip().lower()
+    if sui_only not in ('', 'true', 'false'):
+        raise TaskError('SUI_ONLY must be true or false')
+    return [dict(a, other_medals=False) if sui_only == 'true' else dict(a) for a in accounts]
 
 
 def progress(data, kind):
@@ -692,7 +713,7 @@ def handler(event, context):
         return {'status': 'daily_progress_verified', 'cached_completed_rooms': 1, 'remaining_rooms': 0}
     if event.get('mode') == 'progress_state':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
-        accounts = json.loads(settings.get('BILIBILI_ACCOUNTS_JSON') or '[]')
+        accounts = active_accounts(settings)
         result = []
         for account in accounts:
             state = DailyProgress(ledger, account, settings, today())
@@ -713,13 +734,18 @@ def handler(event, context):
             raise TaskError('Durable reservation check failed')
         return {'status': 'ledger_verified', 'first_reserved': first, 'duplicate_blocked': not second}
     if event.get('mode') == 'health':
+        accounts = active_accounts(settings)
         return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v3',
+                'scope': {'active_account_uids': [int(a['uid']) for a in accounts],
+                          'sui_only': all(not a.get('other_medals') for a in accounts),
+                          'accounts': [{'uid': int(a['uid']), 'other_medals': bool(a.get('other_medals'))}
+                                       for a in accounts]},
                 'pacing': PACING,
                 'danmaku_policy': 'offline_only_all_rooms',
                 'actions_enabled': settings.get('ENABLE_ACTIONS') == 'true',
                 'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true',
                 'wecom_configured': bool(settings.get('WECOM_WEBHOOK_URL'))}
-    accounts = json.loads(settings.get('BILIBILI_ACCOUNTS_JSON') or '[]')
+    accounts = active_accounts(settings)
     if not accounts:
         return {'status': 'needs_credentials'}
     if not isinstance(accounts, list) or len(accounts) > 2:

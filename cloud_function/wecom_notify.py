@@ -39,7 +39,7 @@ def send_notice(settings, ledger, key, text):
         return 'failed_or_uncertain'
 
 
-def events(day, identities, results, primary_uid, round_id=None):
+def events(day, identities, results, primary_uid, round_id=None, sui_only=False):
     if not results and not any(r.get('status') == 'error' for r in identities):
         return []
     round_id = str(round_id if round_id is not None else int(time.time()) // 14400)
@@ -49,7 +49,7 @@ def events(day, identities, results, primary_uid, round_id=None):
         accounts.setdefault(str(account.get('uid')), {'account': account})
     rooms = {r['room'] for r in results if r.get('room')}
     lines = ['直播亲密度任务 · 本轮统计', day,
-             f'本轮检查：{len(results)}次，涉及{len(rooms)}个直播间（两个账号分别统计）']
+             f'本轮检查：{len(results)}次，涉及{len(rooms)}个直播间（{len(accounts)}个账号分别统计）']
     for uid, identity in accounts.items():
         name = identity.get('account', {}).get('name', uid)
         rows = [r for r in results if str((r.get('account') or {}).get('uid', r.get('uid', 'unknown'))) == uid]
@@ -96,10 +96,12 @@ def events(day, identities, results, primary_uid, round_id=None):
         failures = [r.get('reason', 'unknown') for r in rows if r.get('status') == 'error']
         if failures:
             lines.append('异常原因：' + '；'.join(dict.fromkeys(failures))[:160])
-    lines += ['', '每4小时续跑当天剩余队列；首次建立全量列表，已完成当日不重查，跨天重置。岁己优先；其他主播仅免费。']
+    scope = '当前仅运行已启用账号的岁己直播间；其他主播任务已关闭。' if sui_only else '岁己优先；其他主播仅免费。'
+    lines += ['', '每4小时续跑当天剩余队列；已完成当日不重查，跨天重置。' + scope]
     return [(f'{day}-round-{round_id}', '\n'.join(lines))]
 
 
 def report(settings, ledger, day, identities, results, round_id=None):
     return [{'event': key, 'status': send_notice(settings, ledger, key, text)}
-            for key, text in events(day, identities, results, settings.get('PAID_ACCOUNT_UID'), round_id)]
+            for key, text in events(day, identities, results, settings.get('PAID_ACCOUNT_UID'), round_id,
+                                    settings.get('SUI_ONLY', '').strip().lower() == 'true')]

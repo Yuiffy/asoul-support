@@ -87,6 +87,8 @@ Do not put real cookies into the repository or test events.
 | --- | --- |
 | `BILIBILI_ACCOUNTS_JSON` | JSON array matching `accounts.example.json`; exactly one primary and optionally a secondary account |
 | `ENABLE_ACTIONS` | `true` to execute, otherwise read-only |
+| `ACTIVE_ACCOUNT_UIDS` | Optional comma-separated UID allowlist. Excluded accounts make no login, task, or progress-state requests. Leave empty to use all configured accounts. Unknown UIDs fail closed. |
+| `SUI_ONLY` | `true` forces every active account to Sui's room only, overriding `other_medals` without editing encrypted account credentials. Uses a separate daily queue policy; existing gift reservations remain valid. Default `false`. |
 | `ENABLE_PAID_GIFT` | `true` to allow the primary account's daily gift; default off |
 | `PAID_ACCOUNT_UID` | Must match the primary account's UID, in addition to its `allow_paid: true` |
 | `OBS_BUCKET` | Private standard OBS bucket in cn-south-1 for execution reservations |
