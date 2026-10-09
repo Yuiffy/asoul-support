@@ -51,6 +51,19 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(rows[0]['after']['watchLive'],[3,10])
         self.assertIn('/msg/send',rows[0]['reason'])
 
+    def test_expanded_primary_roster_only_offers_paid_gift_to_sui(self):
+        client=Mock(uid=123,watch_seconds=0)
+        client.login.return_value={'uid':123}
+        client.medal_rooms.return_value={1:11,2:22,cloud.SUI_ROOM:cloud.SUI_UID}
+        client.tasks.return_value={'task_info':[],'reach_free_intimacy_limit':True}
+        account={'uid':123,'cookie':'unused','role':'primary','allow_paid':True,'other_medals':True}
+        settings={'PAID_ACCOUNT_UID':'123','ENABLE_PAID_GIFT':'true'}
+        with patch('index.Bili',return_value=client),patch('index.maybe_gift',return_value='already_done') as gift:
+            meta,rows=cloud.run_account_queue(account,cloud.today(),time.monotonic()+60,Ledger(),settings)
+        gift.assert_called_once()
+        self.assertIs(gift.call_args.args[2],True)
+        self.assertEqual([r['gift'] for r in rows],['already_done','disabled_other_room','disabled_other_room'])
+
     def test_unprocessed_rooms_are_reported_on_risk_stop(self):
         gate=cloud.AccountGate()
         client=Mock(uid=123,watch_seconds=0)

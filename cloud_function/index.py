@@ -22,6 +22,7 @@ import uuid
 from asoul_x25kn import enter, heartbeat
 from wecom_notify import report, send_notice
 from daily_progress import DailyProgress, ProgressError
+from run_schedule import INTERVAL_SECONDS, MAX_RUN_SECONDS, CLOUD_TIMEOUT_SECONDS, reservation_slots
 
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.INFO)
@@ -34,7 +35,7 @@ MIXIN = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,2
 LIKE_ENDPOINT = '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
 PACING = {'query_seconds': [1.5, 2.0], 'like_seconds': [15, 20],
           'danmaku_seconds': [30, 40], 'heartbeat': 'server_interval',
-          'priority': 'sui_available_tasks_before_other_rooms'}
+          'priority': 'sui_interactions_first_single_watch_worker'}
 
 
 class TaskError(RuntimeError):
@@ -558,6 +559,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
     metadata = {'account': identity, 'pending_rooms': 0}
     rows = {}
     daily = None
+    watch_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
         daily = DailyProgress(ledger, account, settings, day)
         if daily.header:
@@ -589,7 +591,25 @@ def run_account_queue(account, day, deadline, ledger, settings):
                 raise
 
         watch_targets = []
+
+        def collect_watch(room, future):
+            try:
+                update, seconds = future.result()
+                row = rows[room]
+                row.update(after=merge_progress(row['after'], summary(update)), watch_seconds=seconds)
+                checkpoint(room)
+            except TaskError as exc:
+                rows[room].update(status='error', reason=str(exc))
+                checkpoint(room)
+
+        def collect_ready_watches():
+            for room, future in list(watch_targets):
+                if future.done():
+                    collect_watch(room, future)
+                    watch_targets.remove((room, future))
+
         for room, uid in targets:
+            collect_ready_watches()
             if gate.stopped or not alive(day, deadline):
                 break
             before = {}
@@ -614,15 +634,12 @@ def run_account_queue(account, day, deadline, ledger, settings):
                 if row['storage_full']:
                     checkpoint(room)
                     continue
-                # Finish Sui available rounds first; other rooms get one fair initial round.
+                # Sui interactions first; one watch worker then overlaps the room scan.
                 data = free_actions(client, room, uid, data, day, deadline, 10 if room == SUI_ROOM else 1)
                 row['after'] = summary(data)
                 if pending(data, 'watchLive') and client.room(room).get('live_status') == 1:
-                    if room == SUI_ROOM:
-                        update, seconds = queue_watch(account, gate, room, uid, data, day, deadline)
-                        row.update(after=merge_progress(row['after'], summary(update)), watch_seconds=seconds)
-                    else:
-                        watch_targets.append((room,uid,data))
+                    future = watch_pool.submit(queue_watch, account, gate, room, uid, data, day, deadline)
+                    watch_targets.append((room, future))
                 checkpoint(room)
             except TaskError as exc:
                 row = rows.get(room, queue_error(client, identity, room, before, exc))
@@ -632,6 +649,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
         metadata['pending_rooms'] = len(targets) - len(rows)
         # Sweep remaining free rounds fairly; never retry a rejected room during this run.
         for _ in range(9):
+            collect_ready_watches()
             changed = False
             for room, uid in targets:
                 if gate.stopped or not alive(day, deadline):
@@ -645,31 +663,29 @@ def run_account_queue(account, day, deadline, ledger, settings):
                 try:
                     data = client.tasks(uid)
                     data = free_actions(client,room,uid,data,day,deadline,1)
-                    updated = summary(data)
+                    updated = merge_progress(row['after'], summary(data))
                     changed |= updated != row['after']
                     row['after'] = updated
                     checkpoint(room)
                 except TaskError as exc:
                     row.update(status='error',reason=str(exc))
+                    checkpoint(room)
             if not changed or gate.stopped or not alive(day,deadline):
                 break
-        # Other watch rooms run one at a time after the Sui priority phase.
-        for room, uid, data in watch_targets:
-            if gate.stopped or not alive(day, deadline):
-                break
-            try:
-                update, seconds = queue_watch(account,gate,room,uid,data,day,deadline)
-                rows[room].update(after=summary(update),watch_seconds=seconds)
-                checkpoint(room)
-            except TaskError as exc:
-                rows[room].update(status='error',reason=str(exc))
+        # All watch sessions share the deadline and account gate; only one runs at a time.
+        for room, future in watch_targets:
+            collect_watch(room, future)
         metadata['paused_by_risk'] = gate.risk_code in (-352, -412)
         metadata['incomplete_rooms'] = sum(not all(row.get('after',{}).get(k) and row['after'][k][0]>=row['after'][k][1]
                                                    for k in ('watchLive','sendDanmu','like')) for row in rows.values())
     except (TaskError, ProgressError) as exc:
+        gate.stopped = True
         metadata.update(status='error',reason=str(exc),paused_by_risk=gate.risk_code in (-352, -412))
     except Exception as exc:
+        gate.stopped = True
         metadata.update(status='error',reason=type(exc).__name__)
+    finally:
+        watch_pool.shutdown(wait=True, cancel_futures=True)
     if daily is not None and daily.header is not None:
         metadata.update(daily_completed_rooms=len(daily.done), remaining_rooms=len(daily.remaining()))
     return metadata, list(rows.values())
@@ -719,7 +735,7 @@ def handler(event, context):
             state = DailyProgress(ledger, account, settings, today())
             result.append({'uid': account['uid'], 'initialized': state.header is not None,
                            'completed': len(state.done), 'remaining': len(state.remaining()) if state.header else None})
-        return {'version': 'queue-v3', 'day': today(), 'accounts': result}
+        return {'version': 'queue-v4', 'day': today(), 'accounts': result}
     if event.get('mode') == 'notify_test':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
         status = send_notice(settings, ledger, today() + '-test-summary-v2',
@@ -735,7 +751,10 @@ def handler(event, context):
         return {'status': 'ledger_verified', 'first_reserved': first, 'duplicate_blocked': not second}
     if event.get('mode') == 'health':
         accounts = active_accounts(settings)
-        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v3',
+        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v4',
+                'schedule': {'interval_seconds': INTERVAL_SECONDS, 'max_run_seconds': MAX_RUN_SECONDS,
+                             'cloud_timeout_seconds': CLOUD_TIMEOUT_SECONDS, 'reservation': 'all_occupied_slots',
+                             'required_max_instances': 1, 'required_request_concurrency': 1},
                 'scope': {'active_account_uids': [int(a['uid']) for a in accounts],
                           'sui_only': all(not a.get('other_medals') for a in accounts),
                           'accounts': [{'uid': int(a['uid']), 'other_medals': bool(a.get('other_medals'))}
@@ -763,19 +782,26 @@ def handler(event, context):
                                    'storage_full': bool(data.get('reach_free_intimacy_limit'))})
             except TaskError as exc:
                 identities.append({'account': {'uid': account['uid']}, 'status': 'error', 'reason': str(exc)})
-        return {'status': 'inspection_only', 'version': 'queue-v3', 'accounts': identities}
+        return {'status': 'inspection_only', 'version': 'queue-v4', 'accounts': identities}
     if len({int(a['uid']) for a in accounts}) != len(accounts):
         raise TaskError('Duplicate account UID')
-    requested = event.get('max_seconds', 10800)
-    if type(requested) not in (int, float) or not 90 <= requested <= 10800:
-        raise TaskError('max_seconds must be between 90 and 10800')
+    requested = event.get('max_seconds', MAX_RUN_SECONDS)
+    if type(requested) not in (int, float) or not 90 <= requested <= MAX_RUN_SECONDS:
+        raise TaskError(f'max_seconds must be between 90 and {MAX_RUN_SECONDS}')
+    lifetime = CLOUD_TIMEOUT_SECONDS
     # Respect the deployed timeout even before the console is upgraded.
     if context is not None and hasattr(context, 'getRemainingTimeInMilliSeconds'):
-        requested = min(requested, max(0, context.getRemainingTimeInMilliSeconds() / 1000 - 60))
-    day, round_id = today(), int(time.time()) // 14400
+        remaining = context.getRemainingTimeInMilliSeconds() / 1000
+        requested = min(requested, max(0, remaining - 60))
+        lifetime = max(lifetime, remaining)
+    if requested < 90:
+        return {'status': 'insufficient_time', 'version': 'queue-v4'}
+    started_at = time.time()
+    day, round_id = today(), int(started_at) // INTERVAL_SECONDS
     ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
-    if not ledger.reserve(f'runs/queue-v2/{round_id}.json', {'day': day}):
-        return {'status': 'duplicate_run', 'version': 'queue-v3'}
+    for slot in reservation_slots(started_at, lifetime):
+        if not ledger.reserve(f'runs/queue-v4/{slot}.json', {'day': day, 'started_slot': round_id}):
+            return {'status': 'duplicate_run', 'version': 'queue-v4'}
     identities, results = [], []
     deadline = time.monotonic() + requested
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -784,5 +810,5 @@ def handler(event, context):
             identity, rows = future.result()
             identities.append(identity)
             results.extend(rows)
-    return {'status': 'finished', 'version': 'queue-v3', 'day': day, 'accounts': identities,
+    return {'status': 'finished', 'version': 'queue-v4', 'day': day, 'accounts': identities,
             'results': results, 'notifications': report(settings, ledger, day, identities, results, round_id)}

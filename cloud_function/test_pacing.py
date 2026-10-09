@@ -98,7 +98,7 @@ class PacingTests(unittest.TestCase):
                     self.fail('Must not enter request after risk rejection')
         self.assertFalse(gate.lock.locked())
 
-    def test_sui_full_available_rounds_and_watch_finish_before_other_rooms(self):
+    def test_sui_full_available_rounds_before_other_room_interactions(self):
         sequence=[]
         client=Mock(uid=123,watch_seconds=0)
         client.login.return_value={'uid':123}
@@ -119,5 +119,5 @@ class PacingTests(unittest.TestCase):
             metadata,rows=cloud.run_account_queue({'uid':123,'cookie':'unused','other_medals':True},cloud.today(),time.monotonic()+100,Ledger(),{})
         self.assertNotIn('error',metadata)
         self.assertIn(('free',cloud.SUI_ROOM,10),sequence)
-        self.assertLess(sequence.index(('watch_finished',cloud.SUI_ROOM)),sequence.index(('tasks',11)))
+        self.assertLess(sequence.index(('free',cloud.SUI_ROOM,10)),sequence.index(('tasks',11)))
         self.assertEqual(rows[0]['watch_seconds'],9000)

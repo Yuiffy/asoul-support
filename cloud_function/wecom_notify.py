@@ -5,6 +5,7 @@ import logging
 import time
 import urllib.parse
 import urllib.request
+from run_schedule import INTERVAL_SECONDS
 
 LOG = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ def send_notice(settings, ledger, key, text):
 def events(day, identities, results, primary_uid, round_id=None, sui_only=False):
     if not results and not any(r.get('status') == 'error' for r in identities):
         return []
-    round_id = str(round_id if round_id is not None else int(time.time()) // 14400)
+    round_id = str(round_id if round_id is not None else int(time.time()) // INTERVAL_SECONDS)
     accounts = {str(r.get('account', {}).get('uid')): r for r in identities}
     for row in results:
         account = row.get('account') or {'uid': row.get('uid', 'unknown')}
@@ -97,7 +98,7 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         if failures:
             lines.append('异常原因：' + '；'.join(dict.fromkeys(failures))[:160])
     scope = '当前仅运行已启用账号的岁己直播间；其他主播任务已关闭。' if sui_only else '岁己优先；其他主播仅免费。'
-    lines += ['', '每4小时续跑当天剩余队列；已完成当日不重查，跨天重置。' + scope]
+    lines += ['', '每2小时续跑当天剩余队列；每轮最多110分钟，单实例单请求运行；已完成当日不重查，跨天重置。' + scope]
     return [(f'{day}-round-{round_id}', '\n'.join(lines))]
 
 

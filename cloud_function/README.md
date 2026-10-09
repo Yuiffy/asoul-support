@@ -1,23 +1,33 @@
-# Huawei FunctionGraph adapter — queue-v3
+# Huawei FunctionGraph adapter — queue-v4
 
 An asoul-support based Python cloud function with a full medal-room queue.
 
-## Deployment (four-hour schedule retained)
+## Deployment (two-hour schedule)
 
-Set Timer cron `0 0 */4 * * ?` (every four hours), timeout **10900 seconds**,
+Set Timer cron `0 0 */2 * * ?` (every two hours), timeout **6900 seconds**,
 128MB memory, maximum instances1, request concurrency1, and no reserved instances.
-Default run budget10800seconds; the handler also honors the actual cloud timeout.
-Four-hour run reservations suppress duplicate invocations. The old half-hour
-trigger must be replaced if upgrading from the original five-room version.
+Default and maximum run budget **6600 seconds (110 minutes)**; the handler also
+honors the actual cloud timeout. Keep only one active Timer and stop the old
+half-hour/four-hour triggers, including the previous `bili-fan-paizi-1` timer.
+`runs/queue-v4/<slot>.json` reservations fence every two-hour window an invocation
+could occupy until its cloud timeout, before any account task starts. Manual
+starts near a boundary can therefore suppress the next scheduled execution. An
+uncertain reservation fails closed. Maximum instances1 and request concurrency1
+must also be verified in FunctionGraph; health reports the requirement, not the
+actual cloud setting. Reservation records are never deleted to force a retry.
 
-Two accounts run independently. Each enumerates its entire medal list, with Sui
-first even when a cached remaining queue is resumed. Sui gets all currently
-available interaction rounds and its watch session **before any other room is
-processed**. Offline-only danmaku still applies to Sui. If a task requires a live
-stream that is offline, it stays pending. Other rooms then get a fair serial
-interaction sweep and queued watch sessions. At most one watch session per account
-runs at a time. Overall timeout, midnight or risk stops work, with pending counts
-reported; completing a scan does not imply every room reached its daily caps.
+For the current primary-only rollout, set `ACTIVE_ACCOUNT_UIDS=14279` and
+`SUI_ONLY=false`: 带鱼 processes the full configured medal list; 鹿饼 remains excluded.
+Verify health has only UID14279 and `other_medals:true`. Every active account uses
+Sui first even when resuming a daily queue. Sui gets its available interaction
+rounds first, then a single watch worker runs alongside the remaining room scan
+and interaction sweeps, sharing the same account-wide request/pacing gate. Watch
+sessions run one at a time, with Sui's session queued first. Only the main queue
+thread appends daily checkpoints; watch results merge without decreasing already
+confirmed interaction progress. Queued sessions skip login after risk or deadline.
+This keeps a long Sui watch from blocking all other room interactions. Offline-only
+danmaku still applies to every room. Offline tasks stay pending. Overall timeout,
+midnight or risk stops work; completing a scan does not imply daily caps are met.
 
 Pacing follows the inspected BLTH MedalModule/likeTask implementation for likes:
 a full API-specified round (normally30 clicks) is sent in **one** request, with
@@ -34,10 +44,10 @@ as deployment validation.
 `-352`/`-412` stops the account for this execution; `-101` likewise stops an expired
 login. `10030` disables the failing endpoint for the execution and reports its
 endpoint, code and sanitized message. No challenge bypass or automatic POST retries
-are used. Existing paid-gift limits, daily-cache policy and four-hour schedule are
-unchanged. This change does not add a persistent cross-run risk pause.
+are used. Existing paid-gift limits and daily-cache policy remain in force. This
+change does not add a persistent cross-run risk pause.
 
-## Daily remaining queue (queue-v3)
+## Daily remaining queue (compatible queue-v3 journals)
 
 At the first execution of each Beijing calendar day, each account snapshots its
 eligible medal-room roster. Every verified room completion is immediately appended
@@ -102,18 +112,18 @@ mismatch stop the affected account. Renew a cookie when the Bilibili login expir
 
 1. Create a Python3.10/3.12 event function in cn-south-1; entry `index.handler`.
 2. ZIP `index.py`, `asoul_x25kn.py`, `THIRD_PARTY.md` at ZIP root; no dependencies.
-3. Use 128 MB memory, 10900 seconds timeout, one concurrent instance and one
+3. Use 128 MB memory, 6900 seconds timeout, one concurrent instance and one
    concurrent request per instance. Keep reserved instances at zero.
 4. Use a private standard OBS bucket with versioning off. Grant the function
    execution agency `obs:object:PutObject` for this bucket's `runs/*` and
    `gifts/*` prefixes. AppendObject at `position=0` is the atomic reservation.
    Add GetObject only for `runs/daily/*`; no List/Delete permissions or permanent cloud access keys are needed.
-5. Create a Timer trigger every four hours. Start with actions disabled, test
+5. Create a Timer trigger every two hours. Start with actions disabled, test
    `{"mode":"health"}`, then `{"mode":"inspect"}` with account credentials.
 6. Enable free actions after inspection. Enable the paid switch only after
    confirming the account, gift and daily spending limit.
 
-The function ends before the next four-hour run budget. The server stores task
+The function ends before the next two-hour scheduled run. The server stores task
 progress across invocations. Watch time cannot be earned while the streamer is
 offline. If they stream too briefly, or Bilibili rejects cloud requests, daily
 completion is not guaranteed. The function never bypasses risk-control challenges.
@@ -129,7 +139,7 @@ separated by account: covered rooms, total medal-room count when available,
 verified daily free-task completion, confirmed progress, storage-full skips,
 duplicate skips, errors, and accepted watch-heartbeat seconds. Sui's exact task
 progress and lamp result follow the totals, with cumulative daily completions, cache skips and remaining-queue counts. Inspection-only calls send no summary.
-A durable OBS reservation permits only one report attempt per four-hour slot and
+A durable OBS reservation permits only one report attempt per two-hour slot and
 robot destination; uncertain HTTP outcomes are not blindly retried.
 Only `qyapi.weixin.qq.com/cgi-bin/webhook/send` HTTPS URLs are accepted. Webhook keys
 and cookies are never included in messages or logs. OBS downtime can also prevent
@@ -137,7 +147,10 @@ notification deduplication, so inspect the cloud execution record if no alert ar
 
 Test events: `{"mode":"ledger_check"}` verifies a first append succeeds and a
 duplicate is rejected; `{"mode":"notify_test"}` sends one setup test per day.
-`{"max_seconds":150}` performs a bounded real run after action switches are enabled. It consumes the same four-hour run reservation; use inspection for a smoke check.
+`{"max_seconds":150}` performs a bounded real run after action switches are enabled.
+It consumes the same occupied-window reservations as a scheduled run; use health
+for a smoke check without accessing Bilibili. A short manual run near a boundary
+can suppress the following scheduled run until its reserved slot ends.
 These events contain no credentials and cannot change account or spending limits.
 
 ## Paid-gift boundaries
