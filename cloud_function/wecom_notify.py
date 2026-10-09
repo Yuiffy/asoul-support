@@ -97,7 +97,7 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         failures = [r.get('reason', 'unknown') for r in rows if r.get('status') == 'error']
         if failures:
             lines.append('异常原因：' + '；'.join(dict.fromkeys(failures))[:160])
-    scope = '当前仅运行已启用账号的岁己直播间；其他主播任务已关闭。' if sui_only else '岁己优先；其他主播仅免费。'
+    scope = '当前仅运行已启用账号的岁己直播间；其他主播任务已关闭。' if sui_only else '岁己第一，随后开播点赞和观看，最后未播弹幕；其他主播仅免费。'
     lines += ['', '每2小时续跑当天剩余队列；每轮最多110分钟，单实例单请求运行；已完成当日不重查，跨天重置。' + scope]
     return [(f'{day}-round-{round_id}', '\n'.join(lines))]
 

@@ -30,6 +30,7 @@ class QueueTests(unittest.TestCase):
 
     def test_entire_199_room_list_is_visited_without_five_room_slice(self):
         client=Mock(uid=123,watch_seconds=0)
+        client.live_statuses.return_value={}
         client.login.return_value={'uid':123,'name':'primary'}
         rooms={cloud.SUI_ROOM:cloud.SUI_UID,**{r:1000+r for r in range(1,199)}}
         client.medal_rooms.return_value=rooms
@@ -42,6 +43,7 @@ class QueueTests(unittest.TestCase):
 
     def test_error_does_not_discard_known_primary_progress(self):
         client=Mock(uid=123,watch_seconds=0)
+        client.live_statuses.return_value={}
         client.login.return_value={'uid':123}
         data={'task_info':[{'jump_type':'watchLive','sub_title':'每日上限 3/10'}]}
         client.tasks.return_value=data
@@ -53,6 +55,7 @@ class QueueTests(unittest.TestCase):
 
     def test_expanded_primary_roster_only_offers_paid_gift_to_sui(self):
         client=Mock(uid=123,watch_seconds=0)
+        client.live_statuses.return_value={}
         client.login.return_value={'uid':123}
         client.medal_rooms.return_value={1:11,2:22,cloud.SUI_ROOM:cloud.SUI_UID}
         client.tasks.return_value={'task_info':[],'reach_free_intimacy_limit':True}
@@ -67,6 +70,7 @@ class QueueTests(unittest.TestCase):
     def test_unprocessed_rooms_are_reported_on_risk_stop(self):
         gate=cloud.AccountGate()
         client=Mock(uid=123,watch_seconds=0)
+        client.live_statuses.return_value={}
         client.login.return_value={'uid':123}
         client.medal_rooms.return_value={cloud.SUI_ROOM:cloud.SUI_UID,1:11,2:22}
         def fail(uid):

@@ -143,6 +143,7 @@ class DailyProgressTests(unittest.TestCase):
         state.record(1, {'after': FULL}, DAY)
         client = Mock(uid=123,watch_seconds=0)
         client.gate = cloud.AccountGate()
+        client.live_statuses.return_value={}
         client.login.return_value={'uid':123,'name':'测试'}
         client.tasks.return_value={'task_info':[{'jump_type':k,'sub_title':'每日上限 10/10'} for k in FULL]}
         with patch('index.Bili', return_value=client), patch('index.today',return_value=DAY):
@@ -157,6 +158,7 @@ class DailyProgressTests(unittest.TestCase):
         ledger = Ledger()
         client = Mock(uid=123,watch_seconds=0)
         client.gate = cloud.AccountGate()
+        client.live_statuses.return_value={}
         client.login.return_value={'uid':123,'name':'测试'}
         client.medal_rooms.return_value={cloud.SUI_ROOM:cloud.SUI_UID,1:11}
         data={'task_info':[{'jump_type':k,'sub_title':'每日上限 10/10'} for k in FULL]}
@@ -172,6 +174,7 @@ class DailyProgressTests(unittest.TestCase):
         state.ledger.append_progress = Mock(side_effect=TimeoutError())
         client = Mock(uid=123, watch_seconds=0)
         client.gate = cloud.AccountGate()
+        client.live_statuses.return_value = {}
         client.login.return_value = {'uid':123, 'name':'测试'}
         client.tasks.return_value = {'task_info':[{'jump_type':k,'sub_title':'每日上限 10/10'} for k in FULL]}
         with patch('index.Bili',return_value=client), patch('index.today',return_value=DAY):

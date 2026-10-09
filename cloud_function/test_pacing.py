@@ -101,6 +101,7 @@ class PacingTests(unittest.TestCase):
     def test_sui_full_available_rounds_before_other_room_interactions(self):
         sequence=[]
         client=Mock(uid=123,watch_seconds=0)
+        client.live_statuses.return_value={}
         client.login.return_value={'uid':123}
         client.medal_rooms.return_value={1:11,cloud.SUI_ROOM:cloud.SUI_UID}
         client.room.return_value={'live_status':1}

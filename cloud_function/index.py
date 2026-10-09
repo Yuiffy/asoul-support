@@ -23,6 +23,7 @@ from asoul_x25kn import enter, heartbeat
 from wecom_notify import report, send_notice
 from daily_progress import DailyProgress, ProgressError
 from run_schedule import INTERVAL_SECONDS, MAX_RUN_SECONDS, CLOUD_TIMEOUT_SECONDS, reservation_slots
+from room_priority import prioritize
 
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.INFO)
@@ -35,7 +36,7 @@ MIXIN = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,2
 LIKE_ENDPOINT = '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
 PACING = {'query_seconds': [1.5, 2.0], 'like_seconds': [15, 20],
           'danmaku_seconds': [30, 40], 'heartbeat': 'server_interval',
-          'priority': 'sui_interactions_first_single_watch_worker'}
+          'priority': 'sui_then_live_then_offline', 'watch_workers_per_account': 1}
 
 
 class TaskError(RuntimeError):
@@ -234,7 +235,7 @@ class Bili:
                     params = {k: re.sub(r"[!'()*]", '', str(v)) for k, v in params.items()}
                     query = urllib.parse.urlencode(sorted(params.items()), quote_via=urllib.parse.quote)
                     params['w_rid'] = hashlib.md5((query + self.salt).encode()).hexdigest()
-                target = url + ('?' + urllib.parse.urlencode(params, quote_via=urllib.parse.quote) if params else '')
+                target = url + ('?' + urllib.parse.urlencode(params, doseq=True, quote_via=urllib.parse.quote) if params else '')
                 body = None
                 if method == 'POST':
                     if endpoint == '/msg/send':
@@ -279,6 +280,25 @@ class Bili:
     def tasks(self, uid):
         return self.request(LIVE + '/xlive/app-ucenter/v1/fansMedal/GetActivatedMedalInfo',
                             {'target_id': uid, 'csrf': self.csrf, 'web_location': '444.260'})
+
+    def live_statuses(self, targets, day, deadline):
+        """Batch GET for ordering only; actions still recheck actual room status."""
+        statuses = {}
+        uids = list(dict.fromkeys(uid for _, uid in targets))
+        for offset in range(0, len(uids), 50):
+            if self.gate.stopped or not alive(day, deadline):
+                break
+            data = self.request(LIVE + '/room/v1/Room/get_status_info_by_uids',
+                                {'uids[]': uids[offset:offset+50]})
+            if not isinstance(data, dict):
+                raise TaskError('Invalid batch live-status response')
+            for room, uid in targets:
+                info = data.get(str(uid), {})
+                if (isinstance(info, dict) and info.get('uid') == uid
+                        and room in (info.get('room_id'), info.get('short_id'))
+                        and type(info.get('live_status')) is int and info['live_status'] in (0, 1, 2)):
+                    statuses[room] = info['live_status']
+        return statuses
 
     def medal_rooms(self):
         result = {}
@@ -591,6 +611,18 @@ def run_account_queue(account, day, deadline, ledger, settings):
                 raise
 
         watch_targets = []
+        live_statuses = {}
+
+        def ordered_targets():
+            # Complete Sui interactions and queue its watch before querying other rooms.
+            for target in targets:
+                if target[0] == SUI_ROOM:
+                    yield target
+            other = [t for t in targets if t[0] != SUI_ROOM]
+            if other and not gate.stopped and alive(day, deadline):
+                live_statuses.update(client.live_statuses(other, day, deadline))
+                metadata['live_priority_rooms'] = sum(status == 1 for status in live_statuses.values())
+                yield from prioritize(other, live_statuses)
 
         def collect_watch(room, future):
             try:
@@ -608,7 +640,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                     collect_watch(room, future)
                     watch_targets.remove((room, future))
 
-        for room, uid in targets:
+        for room, uid in ordered_targets():
             collect_ready_watches()
             if gate.stopped or not alive(day, deadline):
                 break
@@ -635,7 +667,8 @@ def run_account_queue(account, day, deadline, ledger, settings):
                     checkpoint(room)
                     continue
                 # Sui interactions first; one watch worker then overlaps the room scan.
-                data = free_actions(client, room, uid, data, day, deadline, 10 if room == SUI_ROOM else 1)
+                rounds = 10 if room == SUI_ROOM or live_statuses.get(room) == 1 else 1
+                data = free_actions(client, room, uid, data, day, deadline, rounds)
                 row['after'] = summary(data)
                 if pending(data, 'watchLive') and client.room(room).get('live_status') == 1:
                     future = watch_pool.submit(queue_watch, account, gate, room, uid, data, day, deadline)
@@ -651,7 +684,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
         for _ in range(9):
             collect_ready_watches()
             changed = False
-            for room, uid in targets:
+            for room, uid in prioritize(targets, live_statuses):
                 if gate.stopped or not alive(day, deadline):
                     break
                 row = rows.get(room)

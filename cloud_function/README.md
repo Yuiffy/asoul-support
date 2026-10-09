@@ -20,7 +20,12 @@ For the current primary-only rollout, set `ACTIVE_ACCOUNT_UIDS=14279` and
 `SUI_ONLY=false`: 带鱼 processes the full configured medal list; 鹿饼 remains excluded.
 Verify health has only UID14279 and `other_medals:true`. Every active account uses
 Sui first even when resuming a daily queue. Sui gets its available interaction
-rounds first, then a single watch worker runs alongside the remaining room scan
+rounds first. Remaining rooms are classified with a per-run batch GET (up to50
+streamer UIDs per request), so live rooms get their available like rounds before
+offline rooms get danmaku. Replay/unknown rooms are last. Ordering snapshots never
+authorize an action: likes, watch and especially offline-only danmaku still check
+current room state. Completed rooms are absent from the batch query. Then a single
+watch worker runs alongside the remaining room scan
 and interaction sweeps, sharing the same account-wide request/pacing gate. Watch
 sessions run one at a time, with Sui's session queued first. Only the main queue
 thread appends daily checkpoints; watch results merge without decreasing already

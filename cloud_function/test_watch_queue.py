@@ -15,6 +15,7 @@ def tasks(watch=0, like=0):
 class WatchQueueTests(unittest.TestCase):
     def test_other_room_interactions_continue_during_sui_watch_with_one_watcher(self):
         client=Mock(uid=123,watch_seconds=0)
+        client.live_statuses.return_value={}
         client.login.return_value={'uid':123}
         client.medal_rooms.return_value={cloud.SUI_ROOM:cloud.SUI_UID,1:11}
         client.tasks.return_value=tasks()
