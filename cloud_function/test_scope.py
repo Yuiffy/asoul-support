@@ -62,7 +62,7 @@ class ScopeTests(unittest.TestCase):
         self.assertFalse(queue.call_args.args[0]['other_medals'])
 
     def test_progress_state_never_loads_disabled_account(self):
-        state = Mock(header=None, done={})
+        state = Mock(header=None, done={}, observed={})
         with patch('index.settings_from', return_value=self.settings()), patch('index.ObsLedger'), \
                 patch('index.DailyProgress', return_value=state) as progress:
             result = cloud.handler({'mode': 'progress_state'}, None)

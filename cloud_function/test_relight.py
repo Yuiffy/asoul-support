@@ -103,3 +103,16 @@ class RelightTests(unittest.TestCase):
         message=events(cloud.today(),[meta],rows,123)[0][1]
         self.assertIn('本轮确认点亮1间',message)
         self.assertIn('免费日任务已满0间',message)
+
+    def test_progress_diagnose_distinguishes_unknown_schema_from_partial_daily_tasks(self,_):
+        state=Mock(header={'targets':[]},done={},observed={
+            1:{'after':{'watchLive':None,'sendDanmu':None,'like':None},'storage_full':False},
+            2:{'after':{'watchLive':[0,10],'sendDanmu':[10,10],'like':[0,10]},'storage_full':True}})
+        state.remaining.return_value=[(1,11),(2,22)]
+        with patch('index.settings_from',return_value={}),patch('index.active_accounts',return_value=[{'uid':123}]),patch('index.ObsLedger'),patch('index.DailyProgress',return_value=state),patch('index.Bili') as bili:
+            data=cloud.handler({'mode':'progress_state'},None)['accounts'][0]
+        bili.assert_not_called()
+        self.assertEqual(data['observed_rooms'],2)
+        self.assertEqual(data['unknown_progress_rooms'],1)
+        self.assertEqual(data['storage_full_rooms'],1)
+        self.assertEqual(data['individual_daily_caps'],{'watchLive':0,'sendDanmu':1,'like':0})
