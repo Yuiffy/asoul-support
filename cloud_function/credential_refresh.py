@@ -168,7 +168,7 @@ class RefreshTransport:
     def info(self, cookie):
         return self.request(INFO, cookie)[0]
 
-    def rotate(self, state, timestamp):
+    def prepare(self, state, timestamp):
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding
         key = serialization.load_pem_public_key(PUBLIC_KEY)
@@ -179,9 +179,12 @@ class RefreshTransport:
         parser.feed(page)
         if not re.fullmatch(r'[a-zA-Z0-9_-]{16,128}', parser.value):
             raise CredentialError('Refresh CSRF unavailable')
+        return parser.value
+
+    def rotate(self, state, refresh_csrf):
         jar = cookies(state['cookie'])
         data, updated = self.request(REFRESH, state['cookie'], 'POST', {
-            'csrf': jar['bili_jct'], 'refresh_csrf': parser.value,
+            'csrf': jar['bili_jct'], 'refresh_csrf': refresh_csrf,
             'source': 'main_web', 'refresh_token': state['refresh_token']})
         if data.get('status') != 0 or not data.get('refresh_token') or not all(
                 updated.get(k) for k in ('SESSDATA', 'bili_jct', 'DedeUserID')):
@@ -219,9 +222,10 @@ def maintain(journal, transport, day, verify):
         timestamp = info.get('timestamp')
         if type(timestamp) is not int or timestamp <= 0:
             raise CredentialError('Refresh timestamp unavailable')
-        # Durable fence before any rotation; unknown POST outcomes are not retried.
+        # A failed read-only preparation is safe to retry. Fence only the POST.
+        refresh_csrf = transport.prepare(state, timestamp)
         journal.save(dict(state, phase='refresh_started'))
-        state = transport.rotate(state, timestamp)
+        state = transport.rotate(state, refresh_csrf)
         journal.save(state)
     # A failed confirmation can resume using the saved NEW cookie and OLD token.
     verify(state['cookie'])

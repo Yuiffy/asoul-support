@@ -42,6 +42,7 @@ class RefreshLifecycleTests(unittest.TestCase):
         self.journal = cr.EncryptedJournal(self.ledger, ACCOUNT, self.key)
         self.transport = Mock()
         self.transport.info.return_value = {'refresh': True, 'timestamp': 1234567890123}
+        self.transport.prepare.return_value = 'read-only-csrf'
         self.transport.rotate.side_effect = lambda state, _: dict(state, cookie=NEW,
             refresh_token='private-new-token', old_refresh_token=state['refresh_token'], phase='pending_confirm')
         self.verify = Mock()
@@ -101,6 +102,14 @@ class RefreshLifecycleTests(unittest.TestCase):
         self.ledger.fail = True
         with self.assertRaisesRegex(cr.CredentialError, 'persistence uncertain'):
             self.run_refresh()
+        self.transport.rotate.assert_not_called()
+
+    def test_read_only_preparation_failure_does_not_fence_or_rotate(self):
+        self.transport.prepare.side_effect = cr.CredentialError('Preparation failed')
+        with self.assertRaises(cr.CredentialError):
+            self.run_refresh()
+        self.assertEqual(self.reload().state['phase'], 'ready')
+        self.assertEqual(self.ledger.calls, [])
         self.transport.rotate.assert_not_called()
 
     def test_unknown_post_outcome_is_fenced_across_runs(self):
@@ -209,7 +218,8 @@ class TransportTests(unittest.TestCase):
                 ('SESSDATA=private-new; HttpOnly; Path=/', 'bili_jct=new-csrf; Path=/', 'DedeUserID=123; Path=/')),
             self.response({'code': 0})])
         with patch('credential_refresh.PUBLIC_KEY', public):
-            state = transport.rotate(cr.seed(ACCOUNT), 1234567890123)
+            refresh_csrf = transport.prepare(cr.seed(ACCOUNT), 1234567890123)
+            state = transport.rotate(cr.seed(ACCOUNT), refresh_csrf)
         transport.confirm(state)
         requests = [call.args[0] for call in transport.opener.open.call_args_list]
         path = requests[0].full_url[len(cr.CORRESPOND):]
