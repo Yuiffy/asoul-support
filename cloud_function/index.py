@@ -817,6 +817,14 @@ def queue_watch(account, gate, room, uid, data, day, deadline):
     return result, worker.watch_seconds
 
 
+def manual_like_probe_handler(event, context):
+    """Optional console entry for one daily probe through an existing health event."""
+    if not isinstance(event, dict) or event.get('mode') != 'health':
+        return handler(event, context)
+    probe_id = hashlib.sha256(('manual-like-entry-v1/' + today()).encode()).hexdigest()[:32]
+    return handler({'mode': 'like_probe', 'probe_id': probe_id}, context)
+
+
 def handler(event, context):
     event = event if isinstance(event, dict) else {}
     settings = settings_from(context)

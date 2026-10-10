@@ -58,6 +58,21 @@ class LikeProbeTests(unittest.TestCase):
                 cloud.handler({'mode': 'like_probe'}, None)
         ledger.assert_not_called()
 
+    def test_optional_console_entry_maps_health_to_same_daily_probe_id(self):
+        with patch('index.today', return_value='2026-10-11'), patch('index.handler') as handler:
+            cloud.manual_like_probe_handler({'mode': 'health'}, None)
+            first = handler.call_args.args[0]
+            cloud.manual_like_probe_handler({'mode': 'health'}, None)
+            self.assertEqual(first, handler.call_args.args[0])
+            self.assertEqual(first['mode'], 'like_probe')
+            self.assertEqual(len(first['probe_id']), 32)
+
+    def test_optional_console_entry_delegates_timer_without_modification(self):
+        event, context = {'trigger_type': 'TIMER'}, object()
+        with patch('index.handler', return_value={'status': 'finished'}) as handler:
+            self.assertEqual(cloud.manual_like_probe_handler(event, context), {'status': 'finished'})
+        handler.assert_called_once_with(event, context)
+
 
 if __name__ == '__main__':
     unittest.main()

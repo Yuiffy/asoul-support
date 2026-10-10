@@ -300,3 +300,16 @@ The normal timer never selects this mode. It sends no chat/gift/watch/WeCom and
 does not update daily progress or rotate credentials. An OBS probe reservation
 prevents replay of the same ID even if the response is lost. A fresh ID is a new
 manual action, so only use it when another probe is explicitly authorized.
+
+When the cloud identity cannot create test events, temporarily select
+`index.manual_like_probe_handler` as the execution entry, then invoke the existing
+`{"mode":"health"}` event once. This console entry maps only health to a fixed
+daily probe ID; timer and other events retain their normal behavior. Repeated
+health probes on the same day are blocked by the OBS reservation. Restore
+`index.handler` afterward so health becomes read-only again.
+
+Deploy packages containing native `.so` dependencies by uploading the complete
+ZIP. Source edits through the cloud web editor can produce a package whose native
+dependencies fail ELF loading; a warm process may conceal this until a cold start.
+After restoring the ZIP, verify `credential_maintain` and `credential_status`,
+which import the encrypted credential adapter. Health alone does not import it.
