@@ -10,6 +10,6 @@ source = Path(__file__).resolve().parent
 args.output.parent.mkdir(parents=True, exist_ok=True)
 with zipfile.ZipFile(args.output, 'w', zipfile.ZIP_DEFLATED) as package:
     for name in ('index.py', 'asoul_x25kn.py', 'daily_progress.py', 'wecom_notify.py',
-                 'run_schedule.py', 'room_priority.py', 'THIRD_PARTY.md'):
+                 'run_schedule.py', 'room_priority.py', 'relight_rules.py', 'THIRD_PARTY.md'):
         package.write(source / name, name)
 print(args.output.resolve())

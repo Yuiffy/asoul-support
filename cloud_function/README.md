@@ -195,3 +195,23 @@ failures never send. There is no live-room exception or option to bypass this ru
 Likes, watch heartbeats and the explicitly allowed daily lamp retain their rules.
 A streamer can technically go live between the final status check and server
 acceptance; Bilibili provides no atomic offline-only send operation.
+
+## Unlit medals and completion reporting
+
+An unlit medal can return only two tasks: `发弹幕10次` and `点赞30次`,
+both with `sub_title=仅点亮` and boolean `is_done`. These are relighting
+tasks, not daily `x/10` counters. Only this explicit schema with
+`is_lighted=false` is supported; unfamiliar responses never authorize actions.
+A live room receives one30-click relight request; an unconfirmed relight like
+is not blindly repeated. Offline relighting can send up to10 messages, checking
+room status before every send and re-reading task state after each one.
+Relighting is allowed with full free-intimacy storage, but normal intimacy
+actions still stop when storage is full. When confirmed lighting exposes the
+normal counters, live likes and watch tasks resume under the existing pacing.
+
+Notifications list confirmed relights, rooms whose API initially offered only
+relighting, each individual daily task's completion, and the snapshot live-room
+count. All-three-task completion remains a strict verified measure; it is not
+the number of rooms scanned, lit, or temporarily ineligible while offline.
+The health build marker is `queue-v4-relight`; OBS admission and gift namespaces
+remain unchanged, preserving existing reservations.

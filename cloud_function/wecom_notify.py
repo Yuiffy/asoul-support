@@ -58,10 +58,17 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
             lines += ['', str(name) + '：账号检查失败', str(identity.get('reason', 'unknown'))[:120]]
             continue
         full, improved, storage, duplicate, errors, seconds = 0, 0, 0, 0, 0, 0
+        relight_only, relighted = 0, 0
+        task_full = {k:0 for k in ('watchLive','sendDanmu','like')}
         for row in rows:
             after, before = row.get('after', {}), row.get('before', {})
             if all(after.get(k) and after[k][0] >= after[k][1] for k in ('watchLive','sendDanmu','like')):
                 full += 1
+            for kind in task_full:
+                if after.get(kind) and after[kind][0] >= after[kind][1]:
+                    task_full[kind] += 1
+            relight_only += bool(row.get('relight_only'))
+            relighted += row.get('before_lighted') is False and row.get('after_lighted') is True
             if any(after.get(k) and before.get(k) and after[k][0] > before[k][0]
                    for k in ('watchLive','sendDanmu','like','feedLight')):
                 improved += 1
@@ -75,6 +82,10 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
                   f'本轮确认免费日任务已满{full}间；本轮有进展{improved}间',
                   f'储蓄满跳过{storage}间；重复跳过{duplicate}间；异常{errors}间',
                   f'已接受观看心跳：{seconds}秒']
+        lines += [f'各项已满：观看{task_full["watchLive"]}间；弹幕{task_full["sendDanmu"]}间；点赞{task_full["like"]}间',
+                  f'仅点亮任务{relight_only}间；本轮确认点亮{relighted}间']
+        if 'live_priority_rooms' in identity:
+            lines.append(f'排序时其他开播房间{identity["live_priority_rooms"]}间；未播或轮播不观看、不点赞')
         if 'cached_completed_rooms' in identity:
             lines.append(f'今日累计完成{identity.get("daily_completed_rooms",0)}间；已完成直接跳过{identity["cached_completed_rooms"]}间；剩余队列{identity.get("remaining_rooms",0)}间')
         lines.append(f'尚未检查{identity.get("pending_rooms",0)}间；已检查但未满{identity.get("incomplete_rooms",0)}间')
@@ -98,7 +109,7 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         if failures:
             lines.append('异常原因：' + '；'.join(dict.fromkeys(failures))[:160])
     scope = '当前仅运行已启用账号的岁己直播间；其他主播任务已关闭。' if sui_only else '岁己第一，随后开播点赞和观看，最后未播弹幕；其他主播仅免费。'
-    lines += ['', '每2小时续跑当天剩余队列；每轮最多110分钟，单实例单请求运行；已完成当日不重查，跨天重置。' + scope]
+    lines += ['', '“已满”须观看、弹幕、点赞三项均满；仅点亮不等于亲密度已满。', '每2小时续跑当天剩余队列；每轮最多110分钟，单实例单请求运行；已完成当日不重查，跨天重置。' + scope]
     return [(f'{day}-round-{round_id}', '\n'.join(lines))]
 
 

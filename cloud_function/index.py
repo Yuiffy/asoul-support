@@ -24,6 +24,7 @@ from wecom_notify import report, send_notice
 from daily_progress import DailyProgress, ProgressError
 from run_schedule import INTERVAL_SECONDS, MAX_RUN_SECONDS, CLOUD_TIMEOUT_SECONDS, reservation_slots
 from room_priority import prioritize
+from relight_rules import relight_task
 
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.INFO)
@@ -483,7 +484,10 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
         if endpoint in client.gate.disabled:
             continue
         for _ in range(max_rounds):
-            if not alive(day, deadline) or data.get('reach_free_intimacy_limit') or not pending(data, kind):
+            relight_count = relight_task(data, kind)
+            if (not alive(day, deadline)
+                    or (data.get('reach_free_intimacy_limit') and not relight_count)
+                    or (not relight_count and not pending(data, kind))):
                 break
             room = client.room(room_id)
             live = room.get('live_status') == 1
@@ -491,21 +495,32 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
                 raise TaskError('Room owner mismatch')
             if (kind == 'like' and not live) or (kind == 'sendDanmu' and room.get('live_status') != 0):
                 break
-            before = progress(data, kind)[0]
+            before = progress(data, kind)[0] if not relight_count else None
             if kind == 'like':
-                item = progress(data, kind)[2]
-                match = re.search(r'(\d+)', item.get('title', ''))
-                if not match or not 1 <= int(match[1]) <= 60:
-                    break
+                if relight_count:
+                    count = relight_count
+                else:
+                    item = progress(data, kind)[2]
+                    match = re.search(r'(\d+)', item.get('title', ''))
+                    if not match or not 1 <= int(match[1]) <= 60:
+                        break
+                    count = int(match[1])
                 # BLTH submits the API's full round count once (normally30).
                 # The account-wide gate enforces15–20s across rooms and passes.
-                client.like(room_id, uid, int(match[1]))
+                client.like(room_id, uid, count)
             else:
                 message = '岁己加油~' if uid == SUI_UID else '支持~'
                 if not client.danmu(room_id, message):
                     break
             time.sleep(10)
             data = client.tasks(uid)
+            if relight_count:
+                # The relight endpoint exposes no incremental counter. Offline
+                # danmaku is bounded by the explicit ten-message task; never
+                # blindly retry a like if its first30 clicks did not relight.
+                if kind == 'like' and data.get('is_lighted') is not True:
+                    break
+                continue
             if not progress(data, kind) or progress(data, kind)[0] <= before:
                 LOG.warning('No confirmed %s progress for room %s; stopping this action', kind, room_id)
                 break
@@ -662,14 +677,19 @@ def run_account_queue(account, day, deadline, ledger, settings):
                     data = client.tasks(uid)
                 row = {'account': identity, 'room': room, 'before': before, 'after': summary(data),
                        'gift': gift, 'storage_full': bool(data.get('reach_free_intimacy_limit')), 'watch_seconds':0}
+                row.update(before_lighted=data.get('is_lighted'), after_lighted=data.get('is_lighted'),
+                           relight_only=any(relight_task(data,k) for k in ('like','sendDanmu')),
+                           live_status=live_statuses.get(room))
                 rows[room] = row
-                if row['storage_full']:
+                if row['storage_full'] and not row['relight_only']:
                     checkpoint(room)
                     continue
                 # Sui interactions first; one watch worker then overlaps the room scan.
-                rounds = 10 if room == SUI_ROOM or live_statuses.get(room) == 1 else 1
+                rounds = 10 if room == SUI_ROOM or live_statuses.get(room) == 1 or row['relight_only'] else 1
                 data = free_actions(client, room, uid, data, day, deadline, rounds)
                 row['after'] = summary(data)
+                row.update(after_lighted=data.get('is_lighted'),
+                           relight_pending=any(relight_task(data,k) for k in ('like','sendDanmu')))
                 if pending(data, 'watchLive') and client.room(room).get('live_status') == 1:
                     future = watch_pool.submit(queue_watch, account, gate, room, uid, data, day, deadline)
                     watch_targets.append((room, future))
@@ -699,6 +719,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                     updated = merge_progress(row['after'], summary(data))
                     changed |= updated != row['after']
                     row['after'] = updated
+                    row['after_lighted'] = data.get('is_lighted')
                     checkpoint(room)
                 except TaskError as exc:
                     row.update(status='error',reason=str(exc))
@@ -767,8 +788,15 @@ def handler(event, context):
         for account in accounts:
             state = DailyProgress(ledger, account, settings, today())
             result.append({'uid': account['uid'], 'initialized': state.header is not None,
-                           'completed': len(state.done), 'remaining': len(state.remaining()) if state.header else None})
-        return {'version': 'queue-v4', 'day': today(), 'accounts': result}
+                           'completed': len(state.done), 'remaining': len(state.remaining()) if state.header else None,
+                           'observed_rooms': len(state.observed),
+                           'unknown_progress_rooms': sum(not any(row.get('after',{}).get(k)
+                               for k in ('watchLive','sendDanmu','like')) for row in state.observed.values()),
+                           'storage_full_rooms': sum(bool(row.get('storage_full')) for row in state.observed.values()),
+                           'individual_daily_caps': {k: sum(bool(row.get('after',{}).get(k))
+                               and row['after'][k][0] == row['after'][k][1] for row in state.observed.values())
+                               for k in ('watchLive','sendDanmu','like')}})
+        return {'version': 'queue-v4-relight', 'day': today(), 'accounts': result}
     if event.get('mode') == 'notify_test':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
         status = send_notice(settings, ledger, today() + '-test-summary-v2',
@@ -784,7 +812,7 @@ def handler(event, context):
         return {'status': 'ledger_verified', 'first_reserved': first, 'duplicate_blocked': not second}
     if event.get('mode') == 'health':
         accounts = active_accounts(settings)
-        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v4',
+        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v4-relight',
                 'schedule': {'interval_seconds': INTERVAL_SECONDS, 'max_run_seconds': MAX_RUN_SECONDS,
                              'cloud_timeout_seconds': CLOUD_TIMEOUT_SECONDS, 'reservation': 'all_occupied_slots',
                              'required_max_instances': 1, 'required_request_concurrency': 1},
@@ -815,7 +843,7 @@ def handler(event, context):
                                    'storage_full': bool(data.get('reach_free_intimacy_limit'))})
             except TaskError as exc:
                 identities.append({'account': {'uid': account['uid']}, 'status': 'error', 'reason': str(exc)})
-        return {'status': 'inspection_only', 'version': 'queue-v4', 'accounts': identities}
+        return {'status': 'inspection_only', 'version': 'queue-v4-relight', 'accounts': identities}
     if len({int(a['uid']) for a in accounts}) != len(accounts):
         raise TaskError('Duplicate account UID')
     requested = event.get('max_seconds', MAX_RUN_SECONDS)
@@ -828,13 +856,13 @@ def handler(event, context):
         requested = min(requested, max(0, remaining - 60))
         lifetime = max(lifetime, remaining)
     if requested < 90:
-        return {'status': 'insufficient_time', 'version': 'queue-v4'}
+        return {'status': 'insufficient_time', 'version': 'queue-v4-relight'}
     started_at = time.time()
     day, round_id = today(), int(started_at) // INTERVAL_SECONDS
     ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
     for slot in reservation_slots(started_at, lifetime):
         if not ledger.reserve(f'runs/queue-v4/{slot}.json', {'day': day, 'started_slot': round_id}):
-            return {'status': 'duplicate_run', 'version': 'queue-v4'}
+            return {'status': 'duplicate_run', 'version': 'queue-v4-relight'}
     identities, results = [], []
     deadline = time.monotonic() + requested
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -843,5 +871,5 @@ def handler(event, context):
             identity, rows = future.result()
             identities.append(identity)
             results.extend(rows)
-    return {'status': 'finished', 'version': 'queue-v4', 'day': day, 'accounts': identities,
+    return {'status': 'finished', 'version': 'queue-v4-relight', 'day': day, 'accounts': identities,
             'results': results, 'notifications': report(settings, ledger, day, identities, results, round_id)}
