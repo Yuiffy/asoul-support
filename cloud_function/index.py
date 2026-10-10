@@ -54,7 +54,7 @@ class ApiError(TaskError):
 
 class AccountGate:
     """Shared across one account's queue and watch workers, never a room-local limit."""
-    def __init__(self):
+    def __init__(self, diagnostics=False):
         self.lock = threading.Lock()
         self.last = 0.0
         self.last_danmu = 0.0
@@ -63,6 +63,12 @@ class AccountGate:
         self.disabled = set()
         self.next_request = 0.0
         self.next_action = {}
+        self.diagnostics = diagnostics
+        self.request_counts = {}
+        self.request_started = None
+        self.previous_request = None
+        self.last_gap = None
+        self.last_rejection = None
 
     def wait_action(self, endpoint):
         while True:
@@ -96,6 +102,13 @@ class AccountGate:
             self.lock.release()
             time.sleep(min(delay, 1))
         try:
+            if self.diagnostics:
+                now = time.monotonic()
+                if self.request_started is None:
+                    self.request_started = now
+                self.last_gap = round(now - self.previous_request, 3) if self.previous_request is not None else None
+                self.previous_request = now
+                self.request_counts[endpoint] = self.request_counts.get(endpoint, 0) + 1
             yield
         finally:
             self.lock.release()
@@ -113,6 +126,10 @@ class AccountGate:
         if code == 10030:
             self.disabled.add(endpoint)
 
+    def diagnostic_summary(self):
+        return {'version': 'like-risk-v1', 'request_counts': dict(self.request_counts),
+                'last_rejection': self.last_rejection} if self.diagnostics else None
+
 
 
 def compact(value):
@@ -127,7 +144,7 @@ def settings_from(context):
     settings = {}
     for key in ('BILIBILI_ACCOUNTS_JSON', 'ENABLE_ACTIONS', 'ENABLE_PAID_GIFT', 'PAID_ACCOUNT_UID',
                 'OBS_BUCKET', 'WECOM_WEBHOOK_URL', 'ACTIVE_ACCOUNT_UIDS', 'SUI_ONLY',
-                'ENABLE_COOKIE_REFRESH', 'CREDENTIAL_ENCRYPTION_KEY'):
+                'ENABLE_COOKIE_REFRESH', 'CREDENTIAL_ENCRYPTION_KEY', 'ENABLE_REQUEST_DIAGNOSTICS'):
         value = context.getUserData(key) if context is not None and hasattr(context, 'getUserData') else None
         settings[key] = value if value is not None else os.environ.get(key, '')
     return settings
@@ -267,7 +284,22 @@ class Bili:
                 req = urllib.request.Request(target, data=body, headers=headers, method=method)
                 with self.opener.open(req, timeout=15) as response:
                     result = json.load(response)
+                    challenge_header = bool(getattr(response, 'headers', {}).get('x-bili-gaia-vvoucher'))
                 if result.get('code') != 0:
+                    if self.gate.diagnostics:
+                        response_data = result.get('data')
+                        self.gate.last_rejection = {
+                            'endpoint': endpoint, 'code': result.get('code'),
+                            'method': method, 'wbi_signed': signed,
+                            'post_body_empty': not bool(body),
+                            'like_click_count': int(params['click_time']) if endpoint == LIKE_ENDPOINT else None,
+                            'previous_request_gap_seconds': self.gate.last_gap,
+                            'elapsed_seconds': round(time.monotonic() - self.gate.request_started, 3),
+                            'challenge_present': challenge_header or
+                                (isinstance(response_data, dict) and bool(response_data.get('v_voucher'))),
+                            'cookie_fields_present': {k: bool(self.cookies.get(k)) for k in
+                                ('buvid3', 'buvid4', 'b_nut', 'bili_ticket', 'LIVE_BUVID')},
+                        }
                     self.gate.rejected(result.get('code'), endpoint)
         except TaskError:
             raise
@@ -617,7 +649,7 @@ def queue_error(client, identity, room, before, exc):
 
 
 def run_account_queue(account, day, deadline, ledger, settings):
-    gate = AccountGate()
+    gate = AccountGate(diagnostics=settings.get('ENABLE_REQUEST_DIAGNOSTICS') == 'true')
     identity = {'uid': account['uid']}
     metadata = {'account': identity, 'pending_rooms': 0}
     rows = {}
@@ -769,6 +801,8 @@ def run_account_queue(account, day, deadline, ledger, settings):
         metadata.update(status='error',reason=type(exc).__name__)
     finally:
         watch_pool.shutdown(wait=True, cancel_futures=True)
+    if gate.diagnostics:
+        metadata['request_diagnostics'] = gate.diagnostic_summary()
     if daily is not None and daily.header is not None:
         metadata.update(daily_completed_rooms=len(daily.done), remaining_rooms=len(daily.remaining()))
     return metadata, list(rows.values())
@@ -891,6 +925,8 @@ def handler(event, context):
                 'credential_policy': 'daily_refresh_encrypted_obs' if settings.get('ENABLE_COOKIE_REFRESH') == 'true'
                                      else 'static_cookie_refresh_disabled',
                 'credential_key_configured': bool(settings.get('CREDENTIAL_ENCRYPTION_KEY')),
+                'request_diagnostics': {'version': 'like-risk-v1',
+                                        'enabled': settings.get('ENABLE_REQUEST_DIAGNOSTICS') == 'true'},
                 'actions_enabled': settings.get('ENABLE_ACTIONS') == 'true',
                 'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true',
                 'wecom_configured': bool(settings.get('WECOM_WEBHOOK_URL'))}

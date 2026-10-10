@@ -269,5 +269,23 @@ Notifications list confirmed relights, rooms whose API initially offered only
 relighting, each individual daily task's completion, and the snapshot live-room
 count. All-three-task completion remains a strict verified measure; it is not
 the number of rooms scanned, lit, or temporarily ineligible while offline.
-The health build marker is `queue-v4-credentials`; OBS admission and gift namespaces
+The health build marker is `queue-v5-refresh`; OBS admission and gift namespaces
 remain unchanged, preserving existing reservations.
+
+## Request rejection diagnostics
+
+Set `ENABLE_REQUEST_DIAGNOSTICS=true` to enable the `like-risk-v1` diagnostic
+marker reported by health. This records per-account endpoint attempt counts across
+the queue, credential maintenance and watch workers, plus the last rejected
+request's timing, method, WBI usage, empty-body flag, like count, device-cookie
+presence and challenge presence. These fields contain no Cookie/token/signature
+or challenge values. Risk-paused WeCom summaries include counts, timing,
+device-cookie presence and credential-maintenance outcome; they do not send
+additional Bilibili requests or change retries, pauses or pacing. Counts represent
+entered request slots, not rooms checked or successful requests. Historical runs
+without the switch cannot be reconstructed from room coverage alone.
+
+This is diagnostic instrumentation, not a claimed fix for `-352`. A valid refreshed
+login does not rule out endpoint-specific validation. Current QR credentials may
+lack browser device cookies; presence alone does not establish the cause. Cloud
+source, device state and request formatting require separate evidence.

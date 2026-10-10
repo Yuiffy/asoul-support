@@ -91,6 +91,22 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         lines.append(f'尚未检查{identity.get("pending_rooms",0)}间；已检查但未满{identity.get("incomplete_rooms",0)}间')
         if identity.get('paused_by_risk'):
             lines.append('账号触发风控，本次队列已暂停，未继续重试。')
+        diagnostics = identity.get('request_diagnostics') or {}
+        if diagnostics and identity.get('paused_by_risk'):
+            counts = diagnostics.get('request_counts', {})
+            likes = counts.get('/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3', 0)
+            lines.append(f'接口诊断 like-risk-v1：请求尝试{sum(counts.values())}次；点赞请求{likes}次')
+            rejection = diagnostics.get('last_rejection') or {}
+            if rejection:
+                lines.append(f'拒绝前请求间隔{rejection.get("previous_request_gap_seconds")}秒；'
+                             f'本轮经过{rejection.get("elapsed_seconds")}秒；'
+                             f'验证码标记{"有" if rejection.get("challenge_present") else "无"}')
+                fields = rejection.get('cookie_fields_present', {})
+                lines.append('设备凭据：' + '，'.join(f'{key}{"有" if present else "无"}'
+                                                  for key, present in fields.items()))
+                lines.append('各接口请求尝试：' + '；'.join(f'{path.rsplit("/",1)[-1]}={count}'
+                                                         for path, count in counts.items()))
+            lines.append('登录凭据维护：' + str(identity.get('credential_refresh', 'unknown')))
         sui = next((r for r in rows if r.get('room') == 25788785 and 'after' in r), None)
         if sui:
             values = []
