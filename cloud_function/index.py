@@ -25,6 +25,7 @@ from daily_progress import DailyProgress, ProgressError
 from run_schedule import INTERVAL_SECONDS, MAX_RUN_SECONDS, CLOUD_TIMEOUT_SECONDS, reservation_slots
 from room_priority import prioritize
 from relight_rules import relight_task
+from credential_refresh import CredentialError, EncryptedJournal, RefreshTransport, maintain
 
 LOG = logging.getLogger(__name__)
 LOG.setLevel(logging.INFO)
@@ -125,7 +126,8 @@ def today():
 def settings_from(context):
     settings = {}
     for key in ('BILIBILI_ACCOUNTS_JSON', 'ENABLE_ACTIONS', 'ENABLE_PAID_GIFT', 'PAID_ACCOUNT_UID',
-                'OBS_BUCKET', 'WECOM_WEBHOOK_URL', 'ACTIVE_ACCOUNT_UIDS', 'SUI_ONLY'):
+                'OBS_BUCKET', 'WECOM_WEBHOOK_URL', 'ACTIVE_ACCOUNT_UIDS', 'SUI_ONLY',
+                'ENABLE_COOKIE_REFRESH', 'CREDENTIAL_ENCRYPTION_KEY'):
         value = context.getUserData(key) if context is not None and hasattr(context, 'getUserData') else None
         settings[key] = value if value is not None else os.environ.get(key, '')
     return settings
@@ -149,6 +151,24 @@ def active_accounts(settings):
     if sui_only not in ('', 'true', 'false'):
         raise TaskError('SUI_ONLY must be true or false')
     return [dict(a, other_medals=False) if sui_only == 'true' else dict(a) for a in accounts]
+
+
+def credential_account(account, settings, ledger, day, gate, read_only=False):
+    """Resolve the newest credential before constructing queue/watch clients."""
+    if settings.get('ENABLE_COOKIE_REFRESH') != 'true':
+        return dict(account), 'disabled'
+    if not settings.get('CREDENTIAL_ENCRYPTION_KEY'):
+        raise CredentialError('Encrypted credential key missing; account stopped')
+    journal = EncryptedJournal(ledger, account, settings['CREDENTIAL_ENCRYPTION_KEY'], read_only)
+    if read_only:
+        state, status = journal.state, journal.state['phase']
+    else:
+        probe = Bili(journal.state['cookie'], account['uid'], gate)
+        transport = RefreshTransport(probe.opener, gate, UA)
+        def verify(cookie):
+            Bili(cookie, account['uid'], gate).login()
+        state, status = maintain(journal, transport, day, verify)
+    return dict(account, cookie=state['cookie'], refresh_token=state['refresh_token']), status
 
 
 def progress(data, kind):
@@ -614,6 +634,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                 metadata.update(status='daily_complete', daily_completed_rooms=len(daily.done),
                                 remaining_rooms=0, incomplete_rooms=0)
                 return metadata, []
+        account, metadata['credential_refresh'] = credential_account(account, settings, ledger, day, gate)
         client = Bili(account['cookie'], account['uid'], gate)
         identity = client.login()
         metadata['account'] = identity
@@ -740,7 +761,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
         metadata['paused_by_risk'] = gate.risk_code in (-352, -412)
         metadata['incomplete_rooms'] = sum(not all(row.get('after',{}).get(k) and row['after'][k][0]>=row['after'][k][1]
                                                    for k in ('watchLive','sendDanmu','like')) for row in rows.values())
-    except (TaskError, ProgressError) as exc:
+    except (TaskError, ProgressError, CredentialError) as exc:
         gate.stopped = True
         metadata.update(status='error',reason=str(exc),paused_by_risk=gate.risk_code in (-352, -412))
     except Exception as exc:
@@ -769,8 +790,11 @@ def handler(event, context):
         result = []
         for account in active_accounts(settings):
             row = {'uid': int(account['uid']), 'logged_in': None,
-                   'refresh_required': None, 'automatic_refresh': False}
+                   'refresh_required': None, 'automatic_refresh': settings.get('ENABLE_COOKIE_REFRESH') == 'true'}
             try:
+                if row['automatic_refresh']:
+                    account, row['credential_phase'] = credential_account(account, settings,
+                        ObsLedger(context, settings.get('OBS_BUCKET', '')), today(), AccountGate(), read_only=True)
                 client = Bili(account['cookie'], account['uid'])
                 row['cookie_fields_present'] = {key: bool(client.cookies.get(key))
                     for key in ('SESSDATA', 'bili_jct', 'DedeUserID', 'buvid3', 'buvid4', 'LIVE_BUVID')}
@@ -779,12 +803,26 @@ def handler(event, context):
                 client.login()
                 row['logged_in'] = True
                 row.update(client.cookie_status())
-            except TaskError as exc:
+            except (TaskError, CredentialError) as exc:
                 if isinstance(exc, ApiError) and exc.code == -101:
                     row['logged_in'] = False
                 row.update(status='error', reason=str(exc))
             result.append(row)
-        return {'version': 'queue-v4-credentials', 'mode': 'credential_status', 'accounts': result}
+        return {'version': 'queue-v5-refresh', 'mode': 'credential_status', 'accounts': result}
+    if event.get('mode') == 'credential_maintain':
+        # Explicit maintenance mode: no intimacy tasks, gifts, notifications or run slots.
+        if settings.get('ENABLE_COOKIE_REFRESH') != 'true':
+            return {'version': 'queue-v5-refresh', 'status': 'refresh_disabled'}
+        ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
+        rows = []
+        for account in active_accounts(settings):
+            row = {'uid': int(account['uid'])}
+            try:
+                _, row['status'] = credential_account(account, settings, ledger, today(), AccountGate())
+            except (TaskError, CredentialError) as exc:
+                row.update(status='error', reason=str(exc))
+            rows.append(row)
+        return {'version': 'queue-v5-refresh', 'mode': 'credential_maintain', 'accounts': rows}
     if event.get('mode') == 'progress_diagnose':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
         prefix = 'runs/daily/_probe/' + uuid.uuid4().hex
@@ -824,7 +862,7 @@ def handler(event, context):
                            'individual_daily_caps': {k: sum(bool(row.get('after',{}).get(k))
                                and row['after'][k][0] == row['after'][k][1] for row in state.observed.values())
                                for k in ('watchLive','sendDanmu','like')}})
-        return {'version': 'queue-v4-credentials', 'day': today(), 'accounts': result}
+        return {'version': 'queue-v5-refresh', 'day': today(), 'accounts': result}
     if event.get('mode') == 'notify_test':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
         status = send_notice(settings, ledger, today() + '-test-summary-v2',
@@ -840,7 +878,7 @@ def handler(event, context):
         return {'status': 'ledger_verified', 'first_reserved': first, 'duplicate_blocked': not second}
     if event.get('mode') == 'health':
         accounts = active_accounts(settings)
-        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v4-credentials',
+        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v5-refresh',
                 'schedule': {'interval_seconds': INTERVAL_SECONDS, 'max_run_seconds': MAX_RUN_SECONDS,
                              'cloud_timeout_seconds': CLOUD_TIMEOUT_SECONDS, 'reservation': 'all_occupied_slots',
                              'required_max_instances': 1, 'required_request_concurrency': 1},
@@ -850,7 +888,9 @@ def handler(event, context):
                                        for a in accounts]},
                 'pacing': PACING,
                 'danmaku_policy': 'offline_only_all_rooms',
-                'credential_policy': 'static_cookie_no_automatic_refresh',
+                'credential_policy': 'daily_refresh_encrypted_obs' if settings.get('ENABLE_COOKIE_REFRESH') == 'true'
+                                     else 'static_cookie_refresh_disabled',
+                'credential_key_configured': bool(settings.get('CREDENTIAL_ENCRYPTION_KEY')),
                 'actions_enabled': settings.get('ENABLE_ACTIONS') == 'true',
                 'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true',
                 'wecom_configured': bool(settings.get('WECOM_WEBHOOK_URL'))}
@@ -865,14 +905,17 @@ def handler(event, context):
         identities = []
         for account in accounts:
             try:
+                if settings.get('ENABLE_COOKIE_REFRESH') == 'true':
+                    account, _ = credential_account(account, settings,
+                        ObsLedger(context, settings.get('OBS_BUCKET', '')), today(), AccountGate(), read_only=True)
                 client = Bili(account['cookie'], account['uid'])
                 identity = client.login()
                 data = client.tasks(SUI_UID)
                 identities.append({'account': identity, 'tasks': summary(data),
                                    'storage_full': bool(data.get('reach_free_intimacy_limit'))})
-            except TaskError as exc:
+            except (TaskError, CredentialError) as exc:
                 identities.append({'account': {'uid': account['uid']}, 'status': 'error', 'reason': str(exc)})
-        return {'status': 'inspection_only', 'version': 'queue-v4-credentials', 'accounts': identities}
+        return {'status': 'inspection_only', 'version': 'queue-v5-refresh', 'accounts': identities}
     if len({int(a['uid']) for a in accounts}) != len(accounts):
         raise TaskError('Duplicate account UID')
     requested = event.get('max_seconds', MAX_RUN_SECONDS)
@@ -885,13 +928,13 @@ def handler(event, context):
         requested = min(requested, max(0, remaining - 60))
         lifetime = max(lifetime, remaining)
     if requested < 90:
-        return {'status': 'insufficient_time', 'version': 'queue-v4-credentials'}
+        return {'status': 'insufficient_time', 'version': 'queue-v5-refresh'}
     started_at = time.time()
     day, round_id = today(), int(started_at) // INTERVAL_SECONDS
     ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
     for slot in reservation_slots(started_at, lifetime):
         if not ledger.reserve(f'runs/queue-v4/{slot}.json', {'day': day, 'started_slot': round_id}):
-            return {'status': 'duplicate_run', 'version': 'queue-v4-credentials'}
+            return {'status': 'duplicate_run', 'version': 'queue-v5-refresh'}
     identities, results = [], []
     deadline = time.monotonic() + requested
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -900,5 +943,5 @@ def handler(event, context):
             identity, rows = future.result()
             identities.append(identity)
             results.extend(rows)
-    return {'status': 'finished', 'version': 'queue-v4-credentials', 'day': day, 'accounts': identities,
+    return {'status': 'finished', 'version': 'queue-v5-refresh', 'day': day, 'accounts': identities,
             'results': results, 'notifications': report(settings, ledger, day, identities, results, round_id)}

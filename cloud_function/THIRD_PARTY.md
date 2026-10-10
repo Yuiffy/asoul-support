@@ -9,6 +9,12 @@
 - Gift request fields checked against `bilibili-api-python` 17.4.2, `LiveRoom.send_gift_gold`.
 - OBS V2 request signing and append semantics checked against Huawei's
   `esdk-obs-python` 3.26.6 (`obs/auth.py`, `obs/client.py`). No SDK is bundled.
+- Cookie refresh protocol/public key checked against
+  [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/login/cookie_refresh.md).
+  Only protocol facts are used; no upstream implementation is vendored.
+- Refresh deployments bundle pinned `cryptography` (Apache-2.0/BSD), `cffi` (MIT)
+  and `pycparser` (BSD). Their wheel license files remain in the deployment ZIP's
+  respective `.dist-info/licenses/` directories.
 
 ## BLTH MIT notice
 

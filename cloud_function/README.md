@@ -108,29 +108,70 @@ Do not put real cookies into the repository or test events.
 | `PAID_ACCOUNT_UID` | Must match the primary account's UID, in addition to its `allow_paid: true` |
 | `OBS_BUCKET` | Private standard OBS bucket in cn-south-1 for execution reservations |
 | `WECOM_WEBHOOK_URL` | Optional WeCom group robot webhook; store as an AES encrypted variable |
+| `ENABLE_COOKIE_REFRESH` | `true` enables daily refresh checks and encrypted credential persistence; default off |
+| `CREDENTIAL_ENCRYPTION_KEY` | Fernet key; generate with `Fernet.generate_key()`, save in an encrypted cloud variable, never Git |
 
 Secondary accounts **cannot** send paid gifts even if their `allow_paid` is accidentally
 enabled. No other streamer can receive paid gifts. Missing/expired cookies or a UID
 mismatch stop the affected account. Renew a cookie when the Bilibili login expires.
 
-`{"mode":"credential_status"}` is a read-only diagnostic for selected accounts.
-It checks login and `passport.bilibili.com/x/passport-login/web/cookie/info` using
-the deployed cookie, reporting whether Bilibili requests a refresh, whether a
-refresh token was configured, and device-cookie presence flags. Cookie/token
-values are never returned. It does not send likes, danmaku, watch heartbeats,
-gifts or notifications, and does not reserve runs or write OBS records.
-Automatic refresh is currently **not implemented** in this standalone adapter;
-the main project's local cookie refresh/writeback is not shared with FunctionGraph.
-A refresh recommendation alone does not establish the cause of a `-352` response.
-Only this GET is allowlisted on the passport host; refresh POSTs are not allowed.
-The QR login helper now preserves the login response's `refresh_token` in its
-ignored local credential file without printing it. Previously generated files
-without that token need a fresh login; another account's token is not compatible.
+## Automatic Cookie refresh (queue-v5-refresh)
+
+Configure each selected account with a matching `cookie` and `refresh_token`
+(browser localStorage `ac_time_value`), then set `ENABLE_COOKIE_REFRESH=true` and
+an encrypted `CREDENTIAL_ENCRYPTION_KEY`. The token and cookie must belong to the
+same login session, not merely the same UID. A valid Cookie alone cannot create a
+refresh token. QR login saves both in its ignored local credential file.
+
+The first unfinished queue run each Beijing day verifies login, queries Bilibili's
+refresh recommendation and rotates only when requested. A fully completed daily
+queue still makes no Bilibili request. Subsequent runs use the saved Cookie and
+skip repeat refresh checks that day; normal login verification still applies.
+The refreshed credential is passed to both the queue and the watch worker.
+Expired login, CAPTCHA/risk responses and missing tokens are reported rather than
+solved or repeatedly retried. Refresh does not guarantee resolution of `-352`.
+
+Credentials are authenticated-encrypted with Fernet (AES-128-CBC/HMAC-SHA256 from
+`cryptography`) in `runs/daily/credentials/<uid>/<seed-hash>.jsonl`. This uses the
+existing OBS GetObject/PutObject prefix grants, with no List/Delete or permanent
+cloud keys. Encryption keys stay separate in encrypted FunctionGraph variables.
+Only ciphertext is written to OBS; Cookie/token values never enter logs, returned
+results, notifications or deployment ZIPs. The append byte position fences stale
+writers. The journal's 2MB limit fails closed; it is not discarded or reset.
+Keep maximum instances and request concurrency at1 for maintenance too.
+
+A durable refresh-started record is saved before rotating. New Cookie, new token
+and old token are encrypted and saved before confirming the old session's expiry.
+The new Cookie's UID/login is verified before confirmation. Failed confirmation
+resumes from the saved new credential without another refresh POST. Uncertain
+rotation or persistence stops that account; it never blindly retries rotation.
+If confirmation was accepted but its response was lost, a repeated confirmation
+may be rejected; reimport a fresh matching Cookie/token pair in that case.
+Replacing the configured seed pair creates a new journal namespace. Keep the key
+stable; changing it cannot decrypt existing state. Export recovery credentials only
+through private authorized channels; this adapter has no credential-export mode.
+
+`{"mode":"credential_status"}` is read-only: it loads the newest encrypted
+credential, checks login and refresh recommendation, and returns only status and
+Cookie/token presence flags. It never initializes OBS objects. A missing-object
+403 without ListBucket is reported as unknown, not silently treated as empty.
+`{"mode":"credential_maintain"}` explicitly checks/refreshes selected credentials
+and verifies encrypted persistence without intimacy tasks, gifts, notifications or
+run-slot reservations. Run it only after verifying the `queue-v5-refresh` health
+marker; this mode changes credential state and can expire the old cloud session.
+It never changes the account scope or clears today's progress/gift reservations.
+
+Install the pinned Linux x86_64 Python3.12 wheels from `requirements.txt` into an
+ignored local directory before building, then pass `build.py --dependencies <dir>`.
+The ZIP allowlists the three pinned packages and retains their licenses. Linux
+runtime must support glibc2.28 or newer for the cryptography wheel; a cold-start
+maintenance test is required before enabling scheduled refresh in production.
 
 ## Deployment
 
 1. Create a Python3.10/3.12 event function in cn-south-1; entry `index.handler`.
-2. ZIP `index.py`, `asoul_x25kn.py`, `THIRD_PARTY.md` at ZIP root; no dependencies.
+2. Use `cloud_function/build.py` to package all adapter modules at ZIP root.
+   Include the pinned Linux dependency directory when enabling Cookie refresh.
 3. Use 128 MB memory, 6900 seconds timeout, one concurrent instance and one
    concurrent request per instance. Keep reserved instances at zero.
 4. Use a private standard OBS bucket with versioning off. Grant the function
@@ -147,7 +188,8 @@ progress across invocations. Watch time cannot be earned while the streamer is
 offline. If they stream too briefly, or Bilibili rejects cloud requests, daily
 completion is not guaranteed. The function never bypasses risk-control challenges.
 
-OBS stores only account/room identifiers, a day or slot, and reservation metadata,
+OBS task journals store account/room identifiers, a day or slot, and reservation metadata;
+credential journals store only encrypted credential records,
 not cookies. Records are immutable: a failed or ambiguous paid request is not retried
 that day. A retention rule of 30 days is sufficient; do not delete today's records.
 Each enabled room creates at most 48 small run records per day, plus one gift record. Daily journals add a small append per changed checkpoint and one GET per account/run.

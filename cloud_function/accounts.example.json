@@ -5,7 +5,8 @@
     "cookie": "SESSDATA=REPLACE_ME; bili_jct=REPLACE_ME; LIVE_BUVID=REPLACE_ME",
     "allow_paid": false,
     "other_medals": false,
-    "banned_uids": []
+    "banned_uids": [],
+    "refresh_token": "REPLACE_WITH_MATCHING_LOGIN_REFRESH_TOKEN"
   },
   {
     "role": "secondary",
@@ -13,6 +14,7 @@
     "cookie": "SESSDATA=REPLACE_ME; bili_jct=REPLACE_ME; LIVE_BUVID=REPLACE_ME",
     "allow_paid": false,
     "other_medals": false,
-    "banned_uids": []
+    "banned_uids": [],
+    "refresh_token": "REPLACE_WITH_MATCHING_LOGIN_REFRESH_TOKEN"
   }
 ]
