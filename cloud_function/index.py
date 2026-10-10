@@ -820,6 +820,46 @@ def queue_watch(account, gate, room, uid, data, day, deadline):
 def handler(event, context):
     event = event if isinstance(event, dict) else {}
     settings = settings_from(context)
+    if event.get('mode') == 'like_probe':
+        # Explicit manual probe: fixed primary/Sui scope and one POST, never a queue run.
+        probe_id = event.get('probe_id', '')
+        if not isinstance(probe_id, str) or not re.fullmatch(r'[a-f0-9]{32}', probe_id):
+            raise TaskError('like_probe requires a unique 32-character hex probe_id')
+        result = {'version': 'sui-like-once-v1', 'mode': 'like_probe', 'room': SUI_ROOM,
+                  'click_count': 30, 'like_attempted': False}
+        if settings.get('ENABLE_ACTIONS') != 'true':
+            return dict(result, status='actions_disabled')
+        accounts = [a for a in active_accounts(settings) if a.get('role') == 'primary']
+        if len(accounts) != 1:
+            raise TaskError('like_probe requires exactly one active primary account')
+        account = accounts[0]
+        result['uid'] = int(account['uid'])
+        gate = AccountGate(diagnostics=True)
+        ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
+        if not ledger.reserve(f'runs/_probe/like-{probe_id}.json', {'uid': result['uid'], 'day': today()}):
+            return dict(result, status='duplicate_probe')
+        try:
+            account, result['credential_phase'] = credential_account(
+                account, settings, ledger, today(), gate, read_only=True)
+            client = Bili(account['cookie'], account['uid'], gate)
+            client.login()
+            result['logged_in'] = True
+            result.update(client.cookie_status())
+            room = client.room(SUI_ROOM)
+            if int(room.get('uid', 0)) != SUI_UID:
+                raise TaskError('Room owner mismatch')
+            result['live_status'] = room.get('live_status')
+            result['before'] = summary(client.tasks(SUI_UID))
+            result['like_attempted'] = True
+            client.like(SUI_ROOM, SUI_UID, 30)
+            result.update(status='accepted', code=0)
+        except (TaskError, CredentialError) as exc:
+            result['status'] = 'rejected' if isinstance(exc, ApiError) else 'error'
+            result['error_type'] = type(exc).__name__
+            if isinstance(exc, ApiError):
+                result.update(code=exc.code, endpoint=exc.endpoint)
+        result['request_diagnostics'] = gate.diagnostic_summary()
+        return result
     if event.get('mode') == 'credential_status':
         result = []
         for account in active_accounts(settings):

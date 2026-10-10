@@ -289,3 +289,14 @@ This is diagnostic instrumentation, not a claimed fix for `-352`. A valid refres
 login does not rule out endpoint-specific validation. Current QR credentials may
 lack browser device cookies; presence alone does not establish the cause. Cloud
 source, device state and request formatting require separate evidence.
+
+For an explicitly authorized manual endpoint check, invoke
+`{"mode":"like_probe","probe_id":"<unique 32-character lowercase hex>"}`.
+This uses the active primary account's newest stored credential in read-only mode,
+checks login/refresh recommendation and Sui room ownership, reads Sui task progress,
+then makes exactly one WBI-signed like POST with `click_time=30`. It can test the
+endpoint while Sui is offline; acceptance alone does not confirm daily task credit.
+The normal timer never selects this mode. It sends no chat/gift/watch/WeCom and
+does not update daily progress or rotate credentials. An OBS probe reservation
+prevents replay of the same ID even if the response is lost. A fresh ID is a new
+manual action, so only use it when another probe is explicitly authorized.
