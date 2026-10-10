@@ -47,8 +47,11 @@ else:
         if not all(cookies.get(k) for k in ('SESSDATA', 'bili_jct', 'DedeUserID')):
             raise RuntimeError('Login succeeded without all required cookies')
         path = args.directory / 'accounts.local.json'
-        path.write_text(json.dumps({'uid': int(cookies['DedeUserID']), 'cookie': '; '.join(k+'='+v for k,v in cookies.items())}), encoding='utf-8')
+        path.write_text(json.dumps({'uid': int(cookies['DedeUserID']),
+            'cookie': '; '.join(k+'='+v for k,v in cookies.items()),
+            'refresh_token': data.get('refresh_token') or ''}), encoding='utf-8')
         os.chmod(path, 0o600)
-        print(json.dumps({'status': 'logged_in', 'uid': int(cookies['DedeUserID'])}))
+        print(json.dumps({'status': 'logged_in', 'uid': int(cookies['DedeUserID']),
+                          'refresh_token_present': bool(data.get('refresh_token'))}))
     else:
         print(json.dumps({'status': {86101:'waiting_for_scan',86090:'waiting_for_confirmation',86038:'expired'}.get(code,'rejected'), 'code':code}))

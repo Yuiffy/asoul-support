@@ -35,6 +35,7 @@ LIVE = 'https://api.live.bilibili.com'
 UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 MIXIN = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13]
 LIKE_ENDPOINT = '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
+COOKIE_INFO = 'https://passport.bilibili.com/x/passport-login/web/cookie/info'
 PACING = {'query_seconds': [1.5, 2.0], 'like_seconds': [15, 20],
           'danmaku_seconds': [30, 40], 'heartbeat': 'server_interval',
           'priority': 'sui_then_live_then_offline', 'watch_workers_per_account': 1}
@@ -205,7 +206,7 @@ class Bili:
         self.opener = urllib.request.build_opener(NoRedirect())
 
     def request(self, url, params=None, method='GET', signed=False, form=None):
-        if urllib.parse.urlsplit(url).hostname not in {
+        if not (url == COOKIE_INFO and method == 'GET') and urllib.parse.urlsplit(url).hostname not in {
             'api.bilibili.com', 'api.live.bilibili.com', 'live-trace.bilibili.com'
         }:
             raise TaskError('Unexpected Bilibili host')
@@ -274,6 +275,13 @@ class Bili:
             raise TaskError('Invalid WBI keys')
         self.salt = ''.join(keys[i] for i in MIXIN)
         return {'uid': self.uid, 'name': nav.get('uname')}
+
+    def cookie_status(self):
+        """Provider's read-only refresh recommendation; never rotates a credential."""
+        data = self.request(COOKIE_INFO, {'csrf': self.csrf})
+        if type(data.get('refresh')) is not bool:
+            raise TaskError('Cookie refresh recommendation is unavailable')
+        return {'refresh_required': data['refresh']}
 
     def room(self, room_id):
         return self.request(LIVE + '/room/v1/Room/get_info', {'room_id': room_id})
@@ -757,6 +765,26 @@ def queue_watch(account, gate, room, uid, data, day, deadline):
 def handler(event, context):
     event = event if isinstance(event, dict) else {}
     settings = settings_from(context)
+    if event.get('mode') == 'credential_status':
+        result = []
+        for account in active_accounts(settings):
+            row = {'uid': int(account['uid']), 'logged_in': None,
+                   'refresh_required': None, 'automatic_refresh': False}
+            try:
+                client = Bili(account['cookie'], account['uid'])
+                row['cookie_fields_present'] = {key: bool(client.cookies.get(key))
+                    for key in ('SESSDATA', 'bili_jct', 'DedeUserID', 'buvid3', 'buvid4', 'LIVE_BUVID')}
+                row['refresh_token_present'] = any(bool(account.get(key))
+                    for key in ('refresh_token', 'ac_time_value', 'acTimeValue')) or bool(client.cookies.get('ac_time_value'))
+                client.login()
+                row['logged_in'] = True
+                row.update(client.cookie_status())
+            except TaskError as exc:
+                if isinstance(exc, ApiError) and exc.code == -101:
+                    row['logged_in'] = False
+                row.update(status='error', reason=str(exc))
+            result.append(row)
+        return {'version': 'queue-v4-credentials', 'mode': 'credential_status', 'accounts': result}
     if event.get('mode') == 'progress_diagnose':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
         prefix = 'runs/daily/_probe/' + uuid.uuid4().hex
@@ -796,7 +824,7 @@ def handler(event, context):
                            'individual_daily_caps': {k: sum(bool(row.get('after',{}).get(k))
                                and row['after'][k][0] == row['after'][k][1] for row in state.observed.values())
                                for k in ('watchLive','sendDanmu','like')}})
-        return {'version': 'queue-v4-relight', 'day': today(), 'accounts': result}
+        return {'version': 'queue-v4-credentials', 'day': today(), 'accounts': result}
     if event.get('mode') == 'notify_test':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
         status = send_notice(settings, ledger, today() + '-test-summary-v2',
@@ -812,7 +840,7 @@ def handler(event, context):
         return {'status': 'ledger_verified', 'first_reserved': first, 'duplicate_blocked': not second}
     if event.get('mode') == 'health':
         accounts = active_accounts(settings)
-        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v4-relight',
+        return {'status': 'ready', 'base': 'asoul-support v4.1.1', 'version': 'queue-v4-credentials',
                 'schedule': {'interval_seconds': INTERVAL_SECONDS, 'max_run_seconds': MAX_RUN_SECONDS,
                              'cloud_timeout_seconds': CLOUD_TIMEOUT_SECONDS, 'reservation': 'all_occupied_slots',
                              'required_max_instances': 1, 'required_request_concurrency': 1},
@@ -822,6 +850,7 @@ def handler(event, context):
                                        for a in accounts]},
                 'pacing': PACING,
                 'danmaku_policy': 'offline_only_all_rooms',
+                'credential_policy': 'static_cookie_no_automatic_refresh',
                 'actions_enabled': settings.get('ENABLE_ACTIONS') == 'true',
                 'paid_enabled': settings.get('ENABLE_PAID_GIFT') == 'true',
                 'wecom_configured': bool(settings.get('WECOM_WEBHOOK_URL'))}
@@ -843,7 +872,7 @@ def handler(event, context):
                                    'storage_full': bool(data.get('reach_free_intimacy_limit'))})
             except TaskError as exc:
                 identities.append({'account': {'uid': account['uid']}, 'status': 'error', 'reason': str(exc)})
-        return {'status': 'inspection_only', 'version': 'queue-v4-relight', 'accounts': identities}
+        return {'status': 'inspection_only', 'version': 'queue-v4-credentials', 'accounts': identities}
     if len({int(a['uid']) for a in accounts}) != len(accounts):
         raise TaskError('Duplicate account UID')
     requested = event.get('max_seconds', MAX_RUN_SECONDS)
@@ -856,13 +885,13 @@ def handler(event, context):
         requested = min(requested, max(0, remaining - 60))
         lifetime = max(lifetime, remaining)
     if requested < 90:
-        return {'status': 'insufficient_time', 'version': 'queue-v4-relight'}
+        return {'status': 'insufficient_time', 'version': 'queue-v4-credentials'}
     started_at = time.time()
     day, round_id = today(), int(started_at) // INTERVAL_SECONDS
     ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
     for slot in reservation_slots(started_at, lifetime):
         if not ledger.reserve(f'runs/queue-v4/{slot}.json', {'day': day, 'started_slot': round_id}):
-            return {'status': 'duplicate_run', 'version': 'queue-v4-relight'}
+            return {'status': 'duplicate_run', 'version': 'queue-v4-credentials'}
     identities, results = [], []
     deadline = time.monotonic() + requested
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
@@ -871,5 +900,5 @@ def handler(event, context):
             identity, rows = future.result()
             identities.append(identity)
             results.extend(rows)
-    return {'status': 'finished', 'version': 'queue-v4-relight', 'day': day, 'accounts': identities,
+    return {'status': 'finished', 'version': 'queue-v4-credentials', 'day': day, 'accounts': identities,
             'results': results, 'notifications': report(settings, ledger, day, identities, results, round_id)}

@@ -113,6 +113,20 @@ Secondary accounts **cannot** send paid gifts even if their `allow_paid` is acci
 enabled. No other streamer can receive paid gifts. Missing/expired cookies or a UID
 mismatch stop the affected account. Renew a cookie when the Bilibili login expires.
 
+`{"mode":"credential_status"}` is a read-only diagnostic for selected accounts.
+It checks login and `passport.bilibili.com/x/passport-login/web/cookie/info` using
+the deployed cookie, reporting whether Bilibili requests a refresh, whether a
+refresh token was configured, and device-cookie presence flags. Cookie/token
+values are never returned. It does not send likes, danmaku, watch heartbeats,
+gifts or notifications, and does not reserve runs or write OBS records.
+Automatic refresh is currently **not implemented** in this standalone adapter;
+the main project's local cookie refresh/writeback is not shared with FunctionGraph.
+A refresh recommendation alone does not establish the cause of a `-352` response.
+Only this GET is allowlisted on the passport host; refresh POSTs are not allowed.
+The QR login helper now preserves the login response's `refresh_token` in its
+ignored local credential file without printing it. Previously generated files
+without that token need a fresh login; another account's token is not compatible.
+
 ## Deployment
 
 1. Create a Python3.10/3.12 event function in cn-south-1; entry `index.handler`.
@@ -213,5 +227,5 @@ Notifications list confirmed relights, rooms whose API initially offered only
 relighting, each individual daily task's completion, and the snapshot live-room
 count. All-three-task completion remains a strict verified measure; it is not
 the number of rooms scanned, lit, or temporarily ineligible while offline.
-The health build marker is `queue-v4-relight`; OBS admission and gift namespaces
+The health build marker is `queue-v4-credentials`; OBS admission and gift namespaces
 remain unchanged, preserving existing reservations.
