@@ -24,7 +24,7 @@ class RoomPriorityTests(unittest.TestCase):
         done={'task_info':[{'jump_type':'like','sub_title':'每日上限 10/10'}]}
         client.tasks.return_value=data
         sequence=[]
-        def free(*args):
+        def free(*args, **kwargs):
             sequence.append((args[1],args[6]))
             return done
         with patch('index.Bili',return_value=client),patch('index.maybe_gift',return_value='already_done'),patch('index.free_actions',side_effect=free):

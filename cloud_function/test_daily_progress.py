@@ -167,6 +167,7 @@ class DailyProgressTests(unittest.TestCase):
 
     def test_second_queue_run_never_refetches_roster_or_completed_rooms(self):
         state = self.create()
+        state.set_like_plan([cloud.SUI_ROOM,1,2])
         state.record(cloud.SUI_ROOM, {'after': FULL}, DAY)
         state.record(1, {'after': FULL}, DAY)
         client = Mock(uid=123,watch_seconds=0)
@@ -199,6 +200,7 @@ class DailyProgressTests(unittest.TestCase):
 
     def test_checkpoint_failure_stops_further_rooms_and_is_not_reported_as_bili_risk(self):
         state = self.create()
+        state.set_like_plan([cloud.SUI_ROOM,1,2])
         state.ledger.append_progress = Mock(side_effect=TimeoutError())
         client = Mock(uid=123, watch_seconds=0)
         client.gate = cloud.AccountGate()

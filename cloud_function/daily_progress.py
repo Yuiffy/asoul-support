@@ -25,8 +25,8 @@ def confirmed_task(value):
             and 0 < value[1] <= 100 and value[0] == value[1])
 
 
-def confirmed_complete(after, needs_lamp=False):
-    kinds = ('watchLive', 'sendDanmu', 'like') + (('feedLight',) if needs_lamp else ())
+def confirmed_complete(after, needs_lamp=False, needs_like=True):
+    kinds = ('watchLive', 'sendDanmu') + (('like',) if needs_like else ()) + (('feedLight',) if needs_lamp else ())
     for kind in kinds:
         value = after.get(kind)
         if not confirmed_task(value):
@@ -42,6 +42,7 @@ class DailyProgress:
         signature = hashlib.sha256(serialized.encode()).hexdigest()[:20]
         self.key = f'runs/daily/{self.policy["uid"]}/{day}-{signature}.jsonl'
         self.header, self.done, self.observed, self.position = None, {}, {}, 0
+        self.like_targets, self.like_reserved_clicks = None, 0
         self.task_done = {kind: set() for kind in ('watchLive', 'sendDanmu', 'like')}
         try:
             raw = ledger.read_progress(self.key)
@@ -69,6 +70,22 @@ class DailyProgress:
                 raise ValueError('Invalid roster')
             by_room = dict(targets)
             for row in records[1:]:
+                if row.get('type') == 'like_plan':
+                    selected = row.get('rooms')
+                    if (self.like_targets is not None or not isinstance(selected, list)
+                            or len(selected) > 16 or len(set(selected)) != len(selected)
+                            or any(type(r) is not int or r not in by_room for r in selected)):
+                        raise ValueError('Invalid like plan')
+                    self.like_targets = selected
+                    continue
+                if row.get('type') == 'like_attempt':
+                    count = row.get('clicks')
+                    if (self.like_targets is None or row.get('room') not in self.like_targets
+                            or type(count) is not int or not 1 <= count <= 300
+                            or self.like_reserved_clicks + count > 5000):
+                        raise ValueError('Invalid like reservation')
+                    self.like_reserved_clicks += count
+                    continue
                 room = row['room']
                 if room not in by_room or row.get('type') not in ('complete', 'pending'):
                     raise ValueError('Invalid journal entry')
@@ -77,7 +94,8 @@ class DailyProgress:
                     self.observed[room] = row
                     continue
                 if not confirmed_complete(row.get('after', {}),
-                                          by_room[room] == 1954091502 and self.policy['paid']):
+                                          by_room[room] == 1954091502 and self.policy['paid'],
+                                          self.like_targets is None or room in self.like_targets):
                     raise ValueError('Invalid completion')
                 self.done[room] = row['after']
             self.header, self.position = header, len(raw)
@@ -109,6 +127,28 @@ class DailyProgress:
         # Never starve the unvisited tail behind the same incomplete rooms.
         return sorted(targets, key=lambda t: 0 if t[1] == 1954091502 else (2 if t[0] in self.observed else 1))
 
+    def set_like_plan(self, rooms):
+        if self.like_targets is not None:
+            return
+        roster = {r for r, _ in self.header['targets']}
+        if (len(rooms) > 16 or len(set(rooms)) != len(rooms)
+                or any(type(r) is not int or r not in roster for r in rooms)):
+            raise ProgressError('Invalid like plan')
+        self._append({'type': 'like_plan', 'rooms': list(rooms)})
+        self.like_targets = list(rooms)
+
+    def reserve_like(self, room, clicks):
+        """Count attempts before POST; lost responses never replenish the budget."""
+        if self.like_targets is None or room not in self.like_targets:
+            return False
+        if type(clicks) is not int or not 1 <= clicks <= 300:
+            raise ProgressError('Invalid like count')
+        if self.like_reserved_clicks + clicks > 5000:
+            return False
+        self._append({'type': 'like_attempt', 'room': room, 'clicks': clicks})
+        self.like_reserved_clicks += clicks
+        return True
+
     def _remember_tasks(self, room, after):
         for kind, rooms in self.task_done.items():
             if confirmed_task(after.get(kind)):
@@ -124,7 +164,9 @@ class DailyProgress:
         if room not in by_room:
             raise ProgressError('Room absent from roster')
         after = {k: row.get('after', {}).get(k) for k in ('watchLive', 'sendDanmu', 'like', 'feedLight')}
-        if row.get('status') == 'error' or not confirmed_complete(after, by_room[room] == 1954091502 and self.policy['paid']):
+        if row.get('status') == 'error' or not confirmed_complete(
+                after, by_room[room] == 1954091502 and self.policy['paid'],
+                self.like_targets is None or room in self.like_targets):
             entry = {'type': 'pending', 'room': room, 'after': after,
                      'error': row.get('status') == 'error', 'storage_full': bool(row.get('storage_full'))}
             if self.observed.get(room) != entry:

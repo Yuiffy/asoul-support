@@ -273,8 +273,10 @@ A manual gift in the tiny interval after the last check can still race the bot.
 Avoid sending manually at the scheduled execution boundary. A payment whose
 response is lost is logged as uncertain, and the reservation blocks another attempt.
 
-Free-task progress is checked after each round. If progress fails to increase,
-that action stops for this invocation. Full free-intimacy storage is reported and
+Free-task progress is checked after each round. Unchanged danmaku progress stops
+that action; verified like counters may lag, so the initially bounded remaining
+like batches can finish under the cooldown without inferring task credit.
+Unknown or changed task schemas stop further batches. Full free-intimacy storage is reported and
 free tasks are skipped; a free-only secondary account never buys a gift to clear it.
 
 ## Verification
@@ -314,8 +316,47 @@ Notifications list confirmed relights, rooms whose API initially offered only
 relighting, each individual daily task's completion, and the snapshot live-room
 count. All-three-task completion remains a strict verified measure; it is not
 the number of rooms scanned, lit, or temporarily ineligible while offline.
+Daily queue completion follows the selected task policy described below;
+individual task and all-three-task counts still require verified API counters.
 The health build marker is `queue-v5-refresh`; OBS admission and gift namespaces
 remain unchanged, preserving existing reservations.
+
+## Daily low-medal like selection
+
+Health exposes `like_policy.version=priority_lowest15_v1`. Each Shanghai day,
+select the fixed priority room plus at most 15 other rooms with the lowest
+verified medal levels, breaking ties by room ID. Unknown levels are excluded.
+The plan is persisted for the day; offline selected rooms are not replaced with
+other live rooms. Priority room runs first, then selected live rooms, other live
+rooms, and offline rooms. Every action still verifies current room status.
+Rooms outside the like plan receive no like POST, including relighting likes,
+but retain offline danmaku and live watch tasks.
+
+Likes use the task title's round count (normally 30) per POST, with 15–20 second
+account-wide cooldowns. An unchanged but known counter can finish only the
+initially verified remaining batches. No same-invocation sweep resends that
+plan. Single-POST 300-click experiments have not confirmed task credit and are
+not enabled in production. Logs record room ID, submitted count and before/after
+task counters without credentials; acceptance is not credited as completion.
+
+Before every queued like POST, append an OBS `like_attempt` reservation. Each
+account's current daily journal permits at most 5000 attempted clicks, including
+failed/uncertain outcomes. This local budget cannot include manual actions,
+other tools or pre-upgrade requests, and is not a guaranteed Bilibili quota.
+`progress_state` returns the fixed rooms and reserved click count for inspection.
+Midday upgrades preserve the existing roster, progress and gift reservations;
+new plans and budgets reset with the next day's journal.
+
+Queue completion requires watch/danmaku/like caps for selected rooms and only
+watch/danmaku caps outside that plan; the paid target additionally requires its
+lamp cap. WeCom labels this as policy completion and separately reports real
+individual task caps and all-three-task caps. It does not promise every room
+will complete, since tasks depend on live status and platform settlement.
+
+The journal now includes `like_plan` and `like_attempt` records. Older readers
+cannot parse these records: a rollback must retain the updated journal reader
+and task policy, or wait until a fresh day's journal. Do not delete current
+progress or gift reservations to work around a rollback.
 
 ## Request rejection diagnostics
 

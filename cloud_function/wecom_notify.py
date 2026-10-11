@@ -88,6 +88,9 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         cumulative = identity.get('daily_task_completed_rooms')
         if cumulative is not None:
             lines.append(f'今日累计单项已满：点赞{cumulative.get("like",0)}间；弹幕{cumulative.get("sendDanmu",0)}间；观看{cumulative.get("watchLive",0)}间')
+        if 'like_target_rooms' in identity:
+            lines.append(f'点赞范围：优先房间＋最低等级最多15间，共{len(identity["like_target_rooms"])}间；名单当天固定，仅开播执行')
+            lines.append(f'新策略今日已预约点赞{identity.get("like_reserved_clicks",0)}/5000次（含失败或不确定请求，旧版本历史不计入）')
         if any('actions' in row for row in rows):
             counts = {kind: sum(row.get('actions',{}).get(kind,{}).get('accepted',0)
                                for row in rows) for kind in ('like','sendDanmu')}
@@ -100,8 +103,8 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
             lines.append(f'排序时其他开播房间{identity["live_priority_rooms"]}间；未播或轮播不观看、不点赞')
         lines.append('最多8间并行观看；每间每轮最多16分钟，岁己同样轮换；心跳成功不等于任务已满')
         if 'cached_completed_rooms' in identity:
-            lines.append(f'今日累计完成{identity.get("daily_completed_rooms",0)}间；已完成直接跳过{identity["cached_completed_rooms"]}间；剩余队列{identity.get("remaining_rooms",0)}间')
-        lines.append(f'尚未检查{identity.get("pending_rooms",0)}间；已检查但未满{identity.get("incomplete_rooms",0)}间')
+            lines.append(f'今日累计策略任务完成{identity.get("daily_completed_rooms",0)}间；已完成直接跳过{identity["cached_completed_rooms"]}间；剩余队列{identity.get("remaining_rooms",0)}间')
+        lines.append(f'本轮尚未检查{identity.get("pending_rooms",0)}间；本轮已检查但三项未满{identity.get("incomplete_rooms",0)}间')
         if identity.get('paused_by_risk'):
             lines.append('账号触发风控，本次队列已暂停，未继续重试。')
         if identity.get('danmaku_frequency_rejections'):
@@ -131,10 +134,12 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
                 values.append(label + ('/'.join(map(str,value)) if value else '未知'))
             lines.append('岁己：' + '，'.join(values))
             stops = {'not_live':'未开播', 'storage_full':'储蓄满',
+                     'daily_like_budget':'今日点赞预约额度用尽', 'planned_batches_sent':'计划点赞批次已提交，待确认入账',
                      'no_confirmed_progress':'请求已接受但计数未增长',
                      'unknown_task':'任务计数未知', 'deadline':'本轮时间用尽',
                      'endpoint_paused':'接口已暂停', 'round_budget':'本次次数用尽',
                      'relight_unconfirmed':'点亮未确认', 'unknown_round_count':'次数要求未知'}
+            stops['task_changed'] = '任务格式变化，停止继续提交'
             stop = sui.get('actions',{}).get('like',{}).get('stop')
             if stop in stops:
                 lines.append('岁己点赞暂未补满：' + stops[stop])
@@ -149,7 +154,9 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         if failures:
             lines.append('异常原因：' + '；'.join(dict.fromkeys(failures))[:160])
     scope = '当前仅运行已启用账号的岁己直播间；其他主播任务已关闭。' if sui_only else '岁己第一，随后开播点赞和观看，最后未播弹幕；其他主播仅免费。'
-    lines += ['', '“累计完成”须三项均满；单项累计按当天接口确认去重，未知/仅点亮不计入。开播期间不发弹幕，未播不观看/点赞，无法保证每间当天三项全满。', '每2小时续跑当天剩余队列；每轮最多110分钟，单实例单请求运行；已完成当日不重查，跨天重置。' + scope]
+    completion = ('策略任务完成：名单内需观看、弹幕、点赞满；名单外仅需观看、弹幕满；付费目标另需灯牌满。'
+                  if any('like_target_rooms' in identity for identity in identities) else '“累计完成”须三项均满；')
+    lines += ['', completion + '单项累计按当天接口确认去重，未知/仅点亮不计入。开播期间不发弹幕，未播不观看/点赞。', '每2小时续跑当天剩余队列；每轮最多110分钟，单实例单请求运行；已完成当日不重查，跨天重置。' + scope]
     return [(f'{day}-round-{round_id}', '\n'.join(lines))]
 
 

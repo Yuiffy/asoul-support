@@ -23,7 +23,7 @@ class Clock:
 
 class PacingTests(unittest.TestCase):
     @patch('index.time.sleep')
-    def test_no_counter_growth_is_reported_without_another_like_post(self,_):
+    def test_unchanged_counter_ends_after_bounded_remaining_like_batches(self,_):
         client=Mock()
         client.gate=cloud.AccountGate()
         client.room.return_value={'uid':11,'live_status':1}
@@ -31,8 +31,10 @@ class PacingTests(unittest.TestCase):
         client.tasks.return_value=data
         audit={}
         cloud.free_actions(client,1,11,data,cloud.today(),time.monotonic()+60,10,audit)
-        client.like.assert_called_once_with(1,11,30)
-        self.assertEqual(audit['like'],{'accepted':1,'stop':'no_confirmed_progress'})
+        self.assertEqual(client.like.call_count,5)
+        self.assertEqual(audit['like'],{'accepted':5,'stop':'no_confirmed_progress'})
+        cloud.free_actions(client,1,11,data,cloud.today(),time.monotonic()+60,1,audit)
+        self.assertEqual(client.like.call_count,5)
 
     def test_offline_partial_likes_have_an_explicit_reason_and_no_post(self):
         client=Mock()
@@ -223,7 +225,7 @@ class PacingTests(unittest.TestCase):
             sequence.append(('tasks',uid))
             return data if uid==cloud.SUI_UID else {'task_info':[],'reach_free_intimacy_limit':True}
         client.tasks.side_effect=tasks
-        def free(*args):
+        def free(*args, **kwargs):
             sequence.append(('free',args[1],args[6]))
             return args[3]
         def watch(*args):

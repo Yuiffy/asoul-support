@@ -23,7 +23,7 @@ class WeComTests(unittest.TestCase):
         text = events('2026-09-14',identities,rows,123)[0][1]
         self.assertIn('今日累计单项已满：点赞15间；弹幕80间；观看2间',text)
         self.assertIn('本轮各项已满：观看0间；弹幕0间；点赞1间',text)
-        self.assertIn('今日累计完成0间',text)
+        self.assertIn('今日累计策略任务完成0间',text)
         self.assertIn('弹幕小频控1次',text)
 
     def test_changed_robot_uses_separate_deduplication_record(self):

@@ -39,7 +39,7 @@ class WatchQueueTests(unittest.TestCase):
             finally:
                 with lock:
                     active-=1
-        def free(client,room,uid,data,day,deadline,max_rounds,audit=None):
+        def free(client,room,uid,data,day,deadline,max_rounds,audit=None,allow_like=True):
             if room!=cloud.SUI_ROOM:
                 if not sui_started.wait(5):
                     raise AssertionError('Sui was not queued first')
@@ -88,7 +88,7 @@ class WatchQueueTests(unittest.TestCase):
                 with lock:
                     active-=1
         with patch('index.Bili',return_value=client),patch('index.maybe_gift',return_value='already_done'), \
-                patch('index.free_actions',side_effect=lambda *args:args[3]), \
+                patch('index.free_actions',side_effect=lambda *args, **kwargs:args[3]), \
                 patch('index.queue_watch',side_effect=watching):
             meta,rows=cloud.run_account_queue({'uid':123,'cookie':'unused','other_medals':True},
                 cloud.today(),time.monotonic()+60,Ledger(),{})

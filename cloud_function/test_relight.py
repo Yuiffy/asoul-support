@@ -111,6 +111,7 @@ class RelightTests(unittest.TestCase):
         c.login.return_value={'uid':123}
         c.live_statuses.return_value={1:1}
         c.medal_rooms.return_value={1:11}
+        c.medal_levels={1:1}
         empty={'task_info':[],'reach_free_intimacy_limit':True}
         c.tasks.side_effect=lambda uid: empty if uid==cloud.SUI_UID else (lit() if c.like.called else unlit())
         with patch('index.Bili',return_value=c),patch('index.maybe_gift',return_value='already_done'),patch('index.queue_watch',return_value=(lit(),60)):
