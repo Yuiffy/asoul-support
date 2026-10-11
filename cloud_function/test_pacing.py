@@ -70,11 +70,11 @@ class PacingTests(unittest.TestCase):
         with patch('index.time.monotonic',side_effect=lambda:clock.now), patch('index.time.time',side_effect=lambda:clock.now), patch('index.time.sleep',side_effect=clock.sleep), patch('index.random.uniform',side_effect=lambda a,b:b):
             client.danmu(1,'test')
             client.danmu(2,'test')
-        self.assertEqual(sent[1][0]-sent[0][0],12)
+        self.assertEqual(sent[1][0]-sent[0][0],8)
         params=urllib.parse.parse_qs(urllib.parse.urlsplit(sent[1][1].full_url).query)
         body=urllib.parse.parse_qs(sent[1][1].data.decode())
-        self.assertEqual(params['wts'],['1012'])
-        self.assertEqual(body['rnd'],['1012'])
+        self.assertEqual(params['wts'],['1008'])
+        self.assertEqual(body['rnd'],['1008'])
         self.assertEqual(client.room.call_count,2)
 
     def test_ten_offline_messages_finish_in_two_minutes_without_bursting(self):
@@ -96,7 +96,7 @@ class PacingTests(unittest.TestCase):
         self.assertEqual(len(sent),10)
         self.assertEqual(cloud.summary(result)['sendDanmu'],[10,10])
         self.assertLessEqual(clock.now-1000,120)
-        self.assertTrue(all(b-a>=8 for a,b in zip(sent,sent[1:])))
+        self.assertTrue(all(b-a>=6 for a,b in zip(sent,sent[1:])))
         self.assertEqual(client.room.call_count,20)
 
     @patch('index.time.sleep')

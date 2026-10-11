@@ -28,6 +28,23 @@ class QueueTests(unittest.TestCase):
         with self.assertRaises(cloud.TaskError):
             gate.check('/msg/send')
 
+    @patch('index.time.sleep')
+    def test_danmaku_frequency_rejection_blocks_sends_in_other_rooms(self, _):
+        client = cloud.Bili('SESSDATA=example; bili_jct=example', 123)
+        client.salt = 'test-salt'
+        client.room = Mock(return_value={'live_status': 0})
+        client.opener.open = Mock(return_value=io.BytesIO(
+            b'{"code":10031,"message":"send frequency exceeded"}'))
+        with self.assertRaises(cloud.ApiError) as rejected:
+            client.danmu(1, 'test')
+        self.assertEqual(rejected.exception.code, 10031)
+        with self.assertRaises(cloud.TaskError):
+            client.danmu(2, 'test')
+        self.assertEqual(client.opener.open.call_count, 1)
+        self.assertEqual(client.room.call_count, 1)
+        self.assertFalse(client.gate.stopped)
+        client.gate.check(cloud.LIKE_ENDPOINT)
+
     def test_entire_199_room_list_is_visited_without_five_room_slice(self):
         client=Mock(uid=123,watch_seconds=0)
         client.live_statuses.return_value={}

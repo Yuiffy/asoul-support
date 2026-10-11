@@ -38,7 +38,7 @@ MIXIN = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,2
 LIKE_ENDPOINT = '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
 COOKIE_INFO = 'https://passport.bilibili.com/x/passport-login/web/cookie/info'
 PACING = {'query_seconds': [1.5, 2.0], 'like_seconds': [15, 20],
-          'danmaku_seconds': [8, 12], 'heartbeat': 'server_interval',
+          'danmaku_seconds': [6, 8], 'heartbeat': 'server_interval',
           'priority': 'sui_then_live_then_offline', 'watch_workers_per_account': 1}
 
 
@@ -123,7 +123,7 @@ class AccountGate:
         if code in (-352, -412, -101):
             self.stopped = True
             self.risk_code = code
-        if code == 10030:
+        if code in (10030, 10031):
             self.disabled.add(endpoint)
 
     def diagnostic_summary(self):

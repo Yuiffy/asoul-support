@@ -38,8 +38,8 @@ Pacing follows the inspected BLTH MedalModule/likeTask implementation for likes:
 a full API-specified round (normally30 clicks) is sent in **one** request, with
 **15–20seconds between like requests**, shared across all rooms for the account.
 The old10-click requests separated by3seconds are removed. Queries retain a slower
-**1.5–2second** shared gap than BLTH's300–800ms query delays. Danmaku retain a slower
-**8–12second** gap than BLTH's6–8seconds, and are sent only with an explicit offline
+**1.5–2second** shared gap than BLTH's300–800ms query delays. Danmaku use a
+**6–8second** cooldown matching BLTH's6–8seconds, and are sent only with an explicit offline
 status. Heartbeats retain the Bilibili server's interval. Cooldown waits release
 the account network lock. WBI signatures and danmaku timestamps are generated
 after all pacing waits, not before. These intervals are not an official guarantee
@@ -47,14 +47,15 @@ against platform risk checks. No deliberate live risk-reproduction POSTs are use
 as deployment validation.
 
 After each accepted danmaku, wait3seconds before checking task progress; the
-account-wide8–12second send cooldown remains active across rooms. Likes retain
+account-wide6–8second send cooldown remains active across rooms. The final offline
+GET and query pacing add time to the actual POST-to-POST interval. Likes retain
 their10second progress-check wait. A ten-message offline relight therefore uses
 roughly1–2minutes rather than the former5–6minutes, subject to query/heartbeat
 contention and server response time. Relighting still does not mean all daily
 intimacy tasks are complete.
 
 `-352`/`-412` stops the account for this execution; `-101` likewise stops an expired
-login. `10030` disables the failing endpoint for the execution and reports its
+login. `10030` and `10031` disable the failing endpoint for the execution and report its
 endpoint, code and sanitized message. No challenge bypass or automatic POST retries
 are used. Existing paid-gift limits and daily-cache policy remain in force. This
 change does not add a persistent cross-run risk pause.
