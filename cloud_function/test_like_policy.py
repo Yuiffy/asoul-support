@@ -161,4 +161,3 @@ class LikePolicyTests(unittest.TestCase):
         client.medal_rooms.assert_not_called()
         self.assertEqual(calls,[(cloud.SUI_ROOM,True),(2,True),(1,False)])
         self.assertEqual(meta['like_target_rooms'],[cloud.SUI_ROOM,2])
-
