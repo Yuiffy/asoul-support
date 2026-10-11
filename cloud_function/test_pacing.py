@@ -70,12 +70,34 @@ class PacingTests(unittest.TestCase):
         with patch('index.time.monotonic',side_effect=lambda:clock.now), patch('index.time.time',side_effect=lambda:clock.now), patch('index.time.sleep',side_effect=clock.sleep), patch('index.random.uniform',side_effect=lambda a,b:b):
             client.danmu(1,'test')
             client.danmu(2,'test')
-        self.assertEqual(sent[1][0]-sent[0][0],40)
+        self.assertEqual(sent[1][0]-sent[0][0],12)
         params=urllib.parse.parse_qs(urllib.parse.urlsplit(sent[1][1].full_url).query)
         body=urllib.parse.parse_qs(sent[1][1].data.decode())
-        self.assertEqual(params['wts'],['1040'])
-        self.assertEqual(body['rnd'],['1040'])
+        self.assertEqual(params['wts'],['1012'])
+        self.assertEqual(body['rnd'],['1012'])
         self.assertEqual(client.room.call_count,2)
+
+    def test_ten_offline_messages_finish_in_two_minutes_without_bursting(self):
+        clock = Clock()
+        client = cloud.Bili('SESSDATA=example; bili_jct=example',123)
+        client.salt = 'test-salt'
+        client.room = Mock(return_value={'uid':11,'live_status':0})
+        sent = []
+        def send(request, **kwargs):
+            sent.append(clock.now)
+            return io.BytesIO(b'{"code":0,"data":{}}')
+        client.opener.open = Mock(side_effect=send)
+        def tasks():
+            return {'task_info':[{'jump_type':'sendDanmu','title':'发弹幕1次',
+                                  'sub_title':f'每日上限 {len(sent)}/10'}]}
+        client.tasks = Mock(side_effect=lambda uid:tasks())
+        with patch('index.time.monotonic',side_effect=lambda:clock.now), patch('index.time.time',side_effect=lambda:clock.now), patch('index.time.sleep',side_effect=clock.sleep), patch('index.random.uniform',side_effect=lambda a,b:b):
+            result = cloud.free_actions(client,1,11,tasks(),cloud.today(),clock.now+120,10)
+        self.assertEqual(len(sent),10)
+        self.assertEqual(cloud.summary(result)['sendDanmu'],[10,10])
+        self.assertLessEqual(clock.now-1000,120)
+        self.assertTrue(all(b-a>=8 for a,b in zip(sent,sent[1:])))
+        self.assertEqual(client.room.call_count,20)
 
     @patch('index.time.sleep')
     def test_one_api_request_per_like_round(self,_):

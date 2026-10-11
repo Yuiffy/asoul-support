@@ -39,12 +39,19 @@ a full API-specified round (normally30 clicks) is sent in **one** request, with
 **15–20seconds between like requests**, shared across all rooms for the account.
 The old10-click requests separated by3seconds are removed. Queries retain a slower
 **1.5–2second** shared gap than BLTH's300–800ms query delays. Danmaku retain a slower
-**30–40second** gap than BLTH's6–8seconds, and are sent only with an explicit offline
+**8–12second** gap than BLTH's6–8seconds, and are sent only with an explicit offline
 status. Heartbeats retain the Bilibili server's interval. Cooldown waits release
 the account network lock. WBI signatures and danmaku timestamps are generated
 after all pacing waits, not before. These intervals are not an official guarantee
 against platform risk checks. No deliberate live risk-reproduction POSTs are used
 as deployment validation.
+
+After each accepted danmaku, wait3seconds before checking task progress; the
+account-wide8–12second send cooldown remains active across rooms. Likes retain
+their10second progress-check wait. A ten-message offline relight therefore uses
+roughly1–2minutes rather than the former5–6minutes, subject to query/heartbeat
+contention and server response time. Relighting still does not mean all daily
+intimacy tasks are complete.
 
 `-352`/`-412` stops the account for this execution; `-101` likewise stops an expired
 login. `10030` disables the failing endpoint for the execution and reports its

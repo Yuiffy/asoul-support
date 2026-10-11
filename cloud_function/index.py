@@ -38,7 +38,7 @@ MIXIN = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,2
 LIKE_ENDPOINT = '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
 COOKIE_INFO = 'https://passport.bilibili.com/x/passport-login/web/cookie/info'
 PACING = {'query_seconds': [1.5, 2.0], 'like_seconds': [15, 20],
-          'danmaku_seconds': [30, 40], 'heartbeat': 'server_interval',
+          'danmaku_seconds': [8, 12], 'heartbeat': 'server_interval',
           'priority': 'sui_then_live_then_offline', 'watch_workers_per_account': 1}
 
 
@@ -255,7 +255,7 @@ class Bili:
                    'Referer': f'https://live.bilibili.com/{SUI_ROOM}',
                    'Origin': 'https://live.bilibili.com'}
         # Wait for the account's danmaku cooldown outside the network lock so
-        # a scheduled heartbeat is not blocked behind a 30-second chat wait.
+        # a scheduled heartbeat is not blocked behind a chat cooldown.
         if endpoint == '/msg/send':
             self.gate.wait_action(endpoint)
             # A room may go live while this account waits in the queue/cooldown.
@@ -572,7 +572,9 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
                 message = '岁己加油~' if uid == SUI_UID else '支持~'
                 if not client.danmu(room_id, message):
                     break
-            time.sleep(10)
+            # Give counters time to update; the account-wide gate still controls
+            # sends across rooms, including the final offline check after waiting.
+            time.sleep(3 if kind == 'sendDanmu' else 10)
             data = client.tasks(uid)
             if relight_count:
                 # The relight endpoint exposes no incremental counter. Offline
