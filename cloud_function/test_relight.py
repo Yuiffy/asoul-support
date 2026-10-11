@@ -109,6 +109,7 @@ class RelightTests(unittest.TestCase):
             1:{'after':{'watchLive':None,'sendDanmu':None,'like':None},'storage_full':False},
             2:{'after':{'watchLive':[0,10],'sendDanmu':[10,10],'like':[0,10]},'storage_full':True}})
         state.remaining.return_value=[(1,11),(2,22)]
+        state.task_counts.return_value={'watchLive':0,'sendDanmu':1,'like':0}
         with patch('index.settings_from',return_value={}),patch('index.active_accounts',return_value=[{'uid':123}]),patch('index.ObsLedger'),patch('index.DailyProgress',return_value=state),patch('index.Bili') as bili:
             data=cloud.handler({'mode':'progress_state'},None)['accounts'][0]
         bili.assert_not_called()

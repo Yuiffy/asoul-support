@@ -63,6 +63,33 @@ class DailyProgressTests(unittest.TestCase):
         resumed = DailyProgress(state.ledger, ACCOUNT, {}, DAY)
         self.assertEqual(resumed.remaining(), [(cloud.SUI_ROOM, cloud.SUI_UID), (2, 22)])
 
+    def test_partial_task_completions_accumulate_across_cold_starts_without_duplicates(self):
+        state = self.create()
+        state.record(1, {'after': {'like':[10,10],'sendDanmu':[5,10]}},DAY)
+        state.record(1, {'after': {'sendDanmu':[10,10]}},DAY)
+        state.record(1, {'after': {},'status':'error'},DAY)
+        state.record(2, {'after': FULL},DAY)
+        resumed = DailyProgress(state.ledger,ACCOUNT,{},DAY)
+        self.assertEqual(resumed.task_counts(), {'like':2,'sendDanmu':2,'watchLive':1})
+        self.assertEqual(len(resumed.done),1)
+        resumed.record(1, {'after': {'like':[10,10],'watchLive':[0,0]}},DAY)
+        self.assertEqual(resumed.task_counts(), {'like':2,'sendDanmu':2,'watchLive':1})
+        tomorrow = DailyProgress(state.ledger,ACCOUNT,{},'2026-09-16')
+        self.assertEqual(tomorrow.task_counts(), {'like':0,'sendDanmu':0,'watchLive':0})
+
+    def test_read_only_progress_state_includes_partial_and_completed_task_history(self):
+        state = self.create()
+        state.record(1, {'after': {'sendDanmu':[10,10]}},DAY)
+        state.record(1, {'after': {}},DAY)
+        state.record(2, {'after': FULL},DAY)
+        with patch('index.settings_from',return_value={}), patch('index.today',return_value=DAY), \
+                patch('index.active_accounts',return_value=[ACCOUNT]), \
+                patch('index.ObsLedger',return_value=state.ledger), patch('index.Bili') as bili:
+            row = cloud.handler({'mode':'progress_state'},None)['accounts'][0]
+        bili.assert_not_called()
+        self.assertEqual(row['completed'],1)
+        self.assertEqual(row['individual_daily_caps'],{'watchLive':1,'sendDanmu':2,'like':1})
+
     def test_new_day_has_no_old_completion_or_roster(self):
         state = self.create()
         state.record(1, {'after': FULL}, DAY)
@@ -136,6 +163,7 @@ class DailyProgressTests(unittest.TestCase):
         client.assert_not_called()
         self.assertEqual(rows, [])
         self.assertEqual(metadata['daily_completed_rooms'], 3)
+        self.assertEqual(metadata['daily_task_completed_rooms'], {k:3 for k in FULL})
 
     def test_second_queue_run_never_refetches_roster_or_completed_rooms(self):
         state = self.create()

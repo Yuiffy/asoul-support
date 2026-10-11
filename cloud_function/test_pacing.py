@@ -22,6 +22,75 @@ class Clock:
 
 
 class PacingTests(unittest.TestCase):
+    def frequency_probe(self, rejections=1, deadline_seconds=300, live_after_wait=False,
+                        risk_during_wait=False, task_full_after_wait=False):
+        clock = Clock()
+        client = cloud.Bili('SESSDATA=example; bili_jct=example',123)
+        client.salt = 'test-salt'
+        if risk_during_wait:
+            clock.on_sleep = lambda:client.gate.rejected(-352,cloud.LIKE_ENDPOINT)
+        sent = []
+        accepted = []
+        def send(request, **kwargs):
+            sent.append(clock.now)
+            code = 10031 if len(sent) <= rejections else 0
+            if not code:
+                accepted.append(clock.now)
+            return io.BytesIO(json.dumps({'code':code,'data':{}}).encode())
+        client.opener.open = Mock(side_effect=send)
+        client.room = Mock(side_effect=lambda room:{'uid':11,
+            'live_status':1 if live_after_wait and clock.now>=1060 else 0})
+        def tasks():
+            count = 1 if task_full_after_wait and clock.now>=1060 else len(accepted)
+            return {'task_info':[{'jump_type':'sendDanmu','sub_title':f'每日上限 {count}/1'}]}
+        client.tasks = Mock(side_effect=lambda uid:tasks())
+        with patch('index.time.monotonic',side_effect=lambda:clock.now), patch('index.time.time',side_effect=lambda:clock.now), patch('index.time.sleep',side_effect=clock.sleep), patch('index.random.uniform',side_effect=lambda a,b:b):
+            try:
+                result = cloud.free_actions(client,1,11,tasks(),cloud.today(),clock.now+deadline_seconds,1)
+                error = None
+            except cloud.TaskError as exc:
+                result, error = None, exc
+        return client, sent, result, error, clock.now
+
+    def test_frequency_rejection_waits_reconciles_and_then_succeeds(self):
+        client, sent, result, error, _ = self.frequency_probe()
+        self.assertIsNone(error)
+        self.assertEqual(sent, [1000,1060])
+        self.assertEqual(cloud.summary(result)['sendDanmu'],[1,1])
+        self.assertEqual(client.tasks.call_count,2)
+        self.assertFalse(client.gate.disabled)
+
+    def test_repeated_frequency_rejections_have_account_wide_bounded_retries(self):
+        client, sent, _, error, _ = self.frequency_probe(rejections=3)
+        self.assertEqual(error.code,10031)
+        self.assertEqual(sent,[1000,1060,1180])
+        self.assertIn('/msg/send',client.gate.disabled)
+        self.assertFalse(client.gate.stopped)
+
+    def test_frequency_wait_cannot_overrun_deadline(self):
+        client, sent, _, error, now = self.frequency_probe(deadline_seconds=45)
+        self.assertIsNone(error)
+        self.assertEqual(sent,[1000])
+        self.assertEqual(now,1000)
+
+    def test_room_that_goes_live_during_frequency_wait_is_not_sent_again(self):
+        _, sent, _, error, _ = self.frequency_probe(live_after_wait=True)
+        self.assertIsNone(error)
+        self.assertEqual(sent,[1000])
+
+    def test_account_risk_interrupts_frequency_wait_without_another_post(self):
+        client, sent, _, error, now = self.frequency_probe(risk_during_wait=True)
+        self.assertIsInstance(error,cloud.TaskError)
+        self.assertTrue(client.gate.stopped)
+        self.assertEqual(sent,[1000])
+        self.assertLess(now,1060)
+
+    def test_task_that_fills_during_frequency_wait_is_not_sent_again(self):
+        _, sent, result, error, _ = self.frequency_probe(task_full_after_wait=True)
+        self.assertIsNone(error)
+        self.assertEqual(sent,[1000])
+        self.assertEqual(cloud.summary(result)['sendDanmu'],[1,1])
+
     def test_like_cooldown_spans_rooms_and_queries_do_not_reset_it(self):
         for choose in (min, max):
             clock, gate = Clock(), cloud.AccountGate()

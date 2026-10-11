@@ -5,6 +5,17 @@ from wecom_notify import events, send_notice
 
 
 class WeComTests(unittest.TestCase):
+    def test_daily_single_task_counts_are_distinct_from_this_round_and_all_task_counts(self):
+        identities = [{'account':{'uid':123}, 'daily_completed_rooms':0,
+            'cached_completed_rooms':0,'daily_task_completed_rooms':{'like':15,'sendDanmu':80,'watchLive':2},
+            'danmaku_frequency_rejections':1}]
+        rows = [{'room':1,'account':{'uid':123},'after':{'like':[10,10]}}]
+        text = events('2026-09-14',identities,rows,123)[0][1]
+        self.assertIn('今日累计单项已满：点赞15间；弹幕80间；观看2间',text)
+        self.assertIn('本轮各项已满：观看0间；弹幕0间；点赞1间',text)
+        self.assertIn('今日累计完成0间',text)
+        self.assertIn('弹幕小频控1次',text)
+
     def test_changed_robot_uses_separate_deduplication_record(self):
         ledger, opener = Mock(), Mock()
         opener.open.side_effect = [io.BytesIO(b'{"errcode":0}'), io.BytesIO(b'{"errcode":0}')]

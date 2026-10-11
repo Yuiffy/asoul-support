@@ -55,9 +55,13 @@ contention and server response time. Relighting still does not mean all daily
 intimacy tasks are complete.
 
 `-352`/`-412` stops the account for this execution; `-101` likewise stops an expired
-login. `10030` and `10031` disable the failing endpoint for the execution and report its
-endpoint, code and sanitized message. No challenge bypass or automatic POST retries
-are used. Existing paid-gift limits and daily-cache policy remain in force. This
+login. `10030` disables the failing endpoint. Explicit danmaku `10031` frequency
+rejections allow at most two resumptions per account per execution: wait60seconds,
+then120seconds. The waits release the request lock for watching; tasks and offline
+status are rechecked before resending. A third10031 pauses danmaku for this run.
+Cross-day, account risk signals and the run deadline interrupt the wait. Network
+timeouts, uncertain POSTs and other rejection codes are never automatically retried.
+Existing paid-gift limits and daily-cache policy remain in force. This
 change does not add a persistent cross-run risk pause.
 
 ## Daily remaining queue (compatible queue-v3 journals)
@@ -77,6 +81,21 @@ are separate and are never cleared by the daily queue. Next day starts a fresh r
 New medals acquired mid-day are discovered the next day. Changes to account scope,
 blacklist or paid-gift policy start a new matching roster; changing only the cookie
 keeps today's progress. No cookies/webhook keys are stored in the journal.
+
+WeCom also reports today's separate like, danmaku and watch completed-room counts.
+These are distinct rooms confirmed at a valid numeric cap at any checkpoint today,
+including partial-room checkpoints and records from earlier executions. They are
+deduplicated by room and task, reconstructed from the existing schema1 journal, and
+reset with the daily policy journal. Missing/relight-only/zero-limit values never
+count as full. `progress_state.individual_daily_caps` uses these same cumulative
+counts, including rooms already removed from the remaining queue.
+
+This queue does not guarantee all medals reach all three caps in one day. Live
+rooms receive likes and watching but no danmaku; offline/loop rooms receive only
+danmaku. Some task schemas only expose relighting. Watching is serial per account;
+other rooms get at most960seconds per session, Sui at most9600seconds, both further
+limited by the6600second execution deadline and live/progress checks. Overlapping
+the room scan improves interaction throughput but does not parallelize watching.
 
 Journal appends use the current byte position. A stale writer or uncertain append
 stops the queue; a fresh invocation reloads and reconciles persisted records. A

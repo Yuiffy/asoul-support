@@ -39,6 +39,7 @@ LIKE_ENDPOINT = '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
 COOKIE_INFO = 'https://passport.bilibili.com/x/passport-login/web/cookie/info'
 PACING = {'query_seconds': [1.5, 2.0], 'like_seconds': [15, 20],
           'danmaku_seconds': [6, 8], 'heartbeat': 'server_interval',
+          'danmaku_frequency_backoff_seconds': [60, 120],
           'priority': 'sui_then_live_then_offline', 'watch_workers_per_account': 1}
 
 
@@ -69,6 +70,7 @@ class AccountGate:
         self.previous_request = None
         self.last_gap = None
         self.last_rejection = None
+        self.danmaku_frequency_rejections = 0
 
     def wait_action(self, endpoint):
         while True:
@@ -123,7 +125,15 @@ class AccountGate:
         if code in (-352, -412, -101):
             self.stopped = True
             self.risk_code = code
-        if code in (10030, 10031):
+        if code == 10031 and endpoint == '/msg/send':
+            self.danmaku_frequency_rejections += 1
+            backoffs = PACING['danmaku_frequency_backoff_seconds']
+            if self.danmaku_frequency_rejections <= len(backoffs):
+                self.next_action[endpoint] = max(self.next_action.get(endpoint, 0),
+                    time.monotonic() + backoffs[self.danmaku_frequency_rejections - 1])
+            else:
+                self.disabled.add(endpoint)
+        if code == 10030:
             self.disabled.add(endpoint)
 
     def diagnostic_summary(self):
@@ -538,6 +548,33 @@ def alive(day, deadline):
     return today() == day and time.monotonic() < deadline
 
 
+def send_danmaku_with_backoff(client, room_id, uid, data, day, deadline):
+    """Only explicit frequency rejections may be retried, within this run's budget."""
+    while alive(day, deadline):
+        try:
+            sent = client.danmu(room_id, '岁己加油~' if uid == SUI_UID else '支持~')
+            return data, sent
+        except ApiError as exc:
+            if (exc.code != 10031 or exc.endpoint != '/msg/send'
+                    or exc.endpoint in client.gate.disabled):
+                raise
+            if client.gate.next_action.get(exc.endpoint, 0) + 5 >= deadline:
+                return data, False
+            while time.monotonic() < client.gate.next_action.get(exc.endpoint, 0):
+                client.gate.check(exc.endpoint)
+                if not alive(day, deadline):
+                    return data, False
+                time.sleep(max(0, min(1, client.gate.next_action[exc.endpoint] - time.monotonic())))
+            if not alive(day, deadline):
+                return data, False
+            # Reconcile task credit before retry; danmu rechecks offline status.
+            data = client.tasks(uid)
+            if not relight_task(data, 'sendDanmu') and (
+                    not pending(data, 'sendDanmu') or data.get('reach_free_intimacy_limit')):
+                return data, False
+    return data, False
+
+
 def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
     for kind in ('like', 'sendDanmu'):
         endpoint = '/msg/send' if kind == 'sendDanmu' else '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
@@ -569,8 +606,8 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
                 # The account-wide gate enforces15–20s across rooms and passes.
                 client.like(room_id, uid, count)
             else:
-                message = '岁己加油~' if uid == SUI_UID else '支持~'
-                if not client.danmu(room_id, message):
+                data, sent = send_danmaku_with_backoff(client, room_id, uid, data, day, deadline)
+                if not sent:
                     break
             # Give counters time to update; the account-wide gate still controls
             # sends across rooms, including the final offline check after waiting.
@@ -666,7 +703,8 @@ def run_account_queue(account, day, deadline, ledger, settings):
                             queue_source='daily_remaining')
             if not daily.remaining():
                 metadata.update(status='daily_complete', daily_completed_rooms=len(daily.done),
-                                remaining_rooms=0, incomplete_rooms=0)
+                                remaining_rooms=0, incomplete_rooms=0,
+                                daily_task_completed_rooms=daily.task_counts())
                 return metadata, []
         account, metadata['credential_refresh'] = credential_account(account, settings, ledger, day, gate)
         client = Bili(account['cookie'], account['uid'], gate)
@@ -805,8 +843,11 @@ def run_account_queue(account, day, deadline, ledger, settings):
         watch_pool.shutdown(wait=True, cancel_futures=True)
     if gate.diagnostics:
         metadata['request_diagnostics'] = gate.diagnostic_summary()
+    metadata['danmaku_frequency_rejections'] = gate.danmaku_frequency_rejections
+    metadata['danmaku_paused'] = '/msg/send' in gate.disabled
     if daily is not None and daily.header is not None:
-        metadata.update(daily_completed_rooms=len(daily.done), remaining_rooms=len(daily.remaining()))
+        metadata.update(daily_completed_rooms=len(daily.done), remaining_rooms=len(daily.remaining()),
+                        daily_task_completed_rooms=daily.task_counts())
     return metadata, list(rows.values())
 
 
@@ -943,9 +984,7 @@ def handler(event, context):
                            'unknown_progress_rooms': sum(not any(row.get('after',{}).get(k)
                                for k in ('watchLive','sendDanmu','like')) for row in state.observed.values()),
                            'storage_full_rooms': sum(bool(row.get('storage_full')) for row in state.observed.values()),
-                           'individual_daily_caps': {k: sum(bool(row.get('after',{}).get(k))
-                               and row['after'][k][0] == row['after'][k][1] for row in state.observed.values())
-                               for k in ('watchLive','sendDanmu','like')}})
+                           'individual_daily_caps': state.task_counts()})
         return {'version': 'queue-v5-refresh', 'day': today(), 'accounts': result}
     if event.get('mode') == 'notify_test':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))

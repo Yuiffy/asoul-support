@@ -6,6 +6,7 @@ import time
 import urllib.parse
 import urllib.request
 from run_schedule import INTERVAL_SECONDS
+from daily_progress import confirmed_complete, confirmed_task
 
 LOG = logging.getLogger(__name__)
 
@@ -62,10 +63,10 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         task_full = {k:0 for k in ('watchLive','sendDanmu','like')}
         for row in rows:
             after, before = row.get('after', {}), row.get('before', {})
-            if all(after.get(k) and after[k][0] >= after[k][1] for k in ('watchLive','sendDanmu','like')):
+            if confirmed_complete(after):
                 full += 1
             for kind in task_full:
-                if after.get(kind) and after[kind][0] >= after[kind][1]:
+                if confirmed_task(after.get(kind)):
                     task_full[kind] += 1
             relight_only += bool(row.get('relight_only'))
             relighted += row.get('before_lighted') is False and row.get('after_lighted') is True
@@ -82,8 +83,11 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
                   f'本轮确认免费日任务已满{full}间；本轮有进展{improved}间',
                   f'储蓄满跳过{storage}间；重复跳过{duplicate}间；异常{errors}间',
                   f'已接受观看心跳：{seconds}秒']
-        lines += [f'各项已满：观看{task_full["watchLive"]}间；弹幕{task_full["sendDanmu"]}间；点赞{task_full["like"]}间',
+        lines += [f'本轮各项已满：观看{task_full["watchLive"]}间；弹幕{task_full["sendDanmu"]}间；点赞{task_full["like"]}间',
                   f'仅点亮任务{relight_only}间；本轮确认点亮{relighted}间']
+        cumulative = identity.get('daily_task_completed_rooms')
+        if cumulative is not None:
+            lines.append(f'今日累计单项已满：点赞{cumulative.get("like",0)}间；弹幕{cumulative.get("sendDanmu",0)}间；观看{cumulative.get("watchLive",0)}间')
         if 'live_priority_rooms' in identity:
             lines.append(f'排序时其他开播房间{identity["live_priority_rooms"]}间；未播或轮播不观看、不点赞')
         if 'cached_completed_rooms' in identity:
@@ -91,6 +95,9 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         lines.append(f'尚未检查{identity.get("pending_rooms",0)}间；已检查但未满{identity.get("incomplete_rooms",0)}间')
         if identity.get('paused_by_risk'):
             lines.append('账号触发风控，本次队列已暂停，未继续重试。')
+        if identity.get('danmaku_frequency_rejections'):
+            paused = '；本轮弹幕已暂停' if identity.get('danmaku_paused') else ''
+            lines.append(f'弹幕小频控{identity["danmaku_frequency_rejections"]}次；最多等待60秒、120秒各续发一次{paused}')
         diagnostics = identity.get('request_diagnostics') or {}
         if diagnostics and identity.get('paused_by_risk'):
             counts = diagnostics.get('request_counts', {})
@@ -125,7 +132,7 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         if failures:
             lines.append('异常原因：' + '；'.join(dict.fromkeys(failures))[:160])
     scope = '当前仅运行已启用账号的岁己直播间；其他主播任务已关闭。' if sui_only else '岁己第一，随后开播点赞和观看，最后未播弹幕；其他主播仅免费。'
-    lines += ['', '“已满”须观看、弹幕、点赞三项均满；仅点亮不等于亲密度已满。', '每2小时续跑当天剩余队列；每轮最多110分钟，单实例单请求运行；已完成当日不重查，跨天重置。' + scope]
+    lines += ['', '“累计完成”须三项均满；单项累计按当天接口确认去重，未知/仅点亮不计入。开播期间不发弹幕，未播不观看/点赞，无法保证每间当天三项全满。', '每2小时续跑当天剩余队列；每轮最多110分钟，单实例单请求运行；已完成当日不重查，跨天重置。' + scope]
     return [(f'{day}-round-{round_id}', '\n'.join(lines))]
 
 

@@ -19,13 +19,17 @@ def policy(account, settings):
                      and settings.get('ENABLE_PAID_GIFT') == 'true')}
 
 
+def confirmed_task(value):
+    return (isinstance(value, list) and len(value) == 2
+            and all(type(n) is int for n in value)
+            and 0 < value[1] <= 100 and value[0] == value[1])
+
+
 def confirmed_complete(after, needs_lamp=False):
     kinds = ('watchLive', 'sendDanmu', 'like') + (('feedLight',) if needs_lamp else ())
     for kind in kinds:
         value = after.get(kind)
-        if (not isinstance(value, list) or len(value) != 2
-                or any(type(n) is not int for n in value)
-                or not 0 < value[1] <= 100 or value[0] != value[1]):
+        if not confirmed_task(value):
             return False
     return True
 
@@ -38,6 +42,7 @@ class DailyProgress:
         signature = hashlib.sha256(serialized.encode()).hexdigest()[:20]
         self.key = f'runs/daily/{self.policy["uid"]}/{day}-{signature}.jsonl'
         self.header, self.done, self.observed, self.position = None, {}, {}, 0
+        self.task_done = {kind: set() for kind in ('watchLive', 'sendDanmu', 'like')}
         try:
             raw = ledger.read_progress(self.key)
             if raw is None:
@@ -67,6 +72,7 @@ class DailyProgress:
                 room = row['room']
                 if room not in by_room or row.get('type') not in ('complete', 'pending'):
                     raise ValueError('Invalid journal entry')
+                self._remember_tasks(room, row.get('after', {}))
                 if row['type'] == 'pending':
                     self.observed[room] = row
                     continue
@@ -103,6 +109,14 @@ class DailyProgress:
         # Never starve the unvisited tail behind the same incomplete rooms.
         return sorted(targets, key=lambda t: 0 if t[1] == 1954091502 else (2 if t[0] in self.observed else 1))
 
+    def _remember_tasks(self, room, after):
+        for kind, rooms in self.task_done.items():
+            if confirmed_task(after.get(kind)):
+                rooms.add(room)
+
+    def task_counts(self):
+        return {kind: len(rooms) for kind, rooms in self.task_done.items()}
+
     def record(self, room, row, current_day):
         if current_day != self.day or room in self.done:
             return False
@@ -116,7 +130,9 @@ class DailyProgress:
             if self.observed.get(room) != entry:
                 self._append(entry)
                 self.observed[room] = entry
+            self._remember_tasks(room, after)
             return False
         self._append({'type': 'complete', 'room': room, 'after': after})
         self.done[room] = after.copy()
+        self._remember_tasks(room, after)
         return True
