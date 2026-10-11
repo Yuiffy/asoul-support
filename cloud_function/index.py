@@ -576,22 +576,36 @@ def send_danmaku_with_backoff(client, room_id, uid, data, day, deadline):
     return data, False
 
 
-def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
+def free_actions(client, room_id, uid, data, day, deadline, max_rounds, audit=None):
+    audit = audit if audit is not None else {}
     for kind in ('like', 'sendDanmu'):
+        outcome = audit.setdefault(kind, {'accepted': 0, 'stop': None})
         endpoint = '/msg/send' if kind == 'sendDanmu' else '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
         if endpoint in client.gate.disabled:
+            outcome['stop'] = 'endpoint_paused'
             continue
-        for _ in range(max_rounds):
+        relight_rounds, daily_rounds = 0, 0
+        while True:
             relight_count = relight_task(data, kind)
-            if (not alive(day, deadline)
-                    or (data.get('reach_free_intimacy_limit') and not relight_count)
-                    or (not relight_count and not pending(data, kind))):
+            if not alive(day, deadline):
+                outcome['stop'] = 'deadline'
+                break
+            if data.get('reach_free_intimacy_limit') and not relight_count:
+                outcome['stop'] = 'storage_full'
+                break
+            if not relight_count and not pending(data, kind):
+                outcome['stop'] = 'full' if progress(data, kind) else 'unknown_task'
+                break
+            if ((relight_count and relight_rounds >= (1 if kind == 'like' else min(10, max_rounds)))
+                    or (not relight_count and daily_rounds >= max_rounds)):
+                outcome['stop'] = 'round_budget'
                 break
             room = client.room(room_id)
             live = room.get('live_status') == 1
             if int(room.get('uid', 0)) != uid:
                 raise TaskError('Room owner mismatch')
             if (kind == 'like' and not live) or (kind == 'sendDanmu' and room.get('live_status') != 0):
+                outcome['stop'] = 'not_live' if kind == 'like' else 'not_offline'
                 break
             before = progress(data, kind)[0] if not relight_count else None
             if kind == 'like':
@@ -601,6 +615,7 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
                     item = progress(data, kind)[2]
                     match = re.search(r'(\d+)', item.get('title', ''))
                     if not match or not 1 <= int(match[1]) <= 60:
+                        outcome['stop'] = 'unknown_round_count'
                         break
                     count = int(match[1])
                 # BLTH submits the API's full round count once (normally30).
@@ -609,7 +624,13 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
             else:
                 data, sent = send_danmaku_with_backoff(client, room_id, uid, data, day, deadline)
                 if not sent:
+                    outcome['stop'] = 'send_not_attempted'
                     break
+            outcome['accepted'] += 1
+            if relight_count:
+                relight_rounds += 1
+            else:
+                daily_rounds += 1
             # Give counters time to update; the account-wide gate still controls
             # sends across rooms, including the final offline check after waiting.
             time.sleep(3 if kind == 'sendDanmu' else 10)
@@ -619,9 +640,11 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds):
                 # danmaku is bounded by the explicit ten-message task; never
                 # blindly retry a like if its first30 clicks did not relight.
                 if kind == 'like' and data.get('is_lighted') is not True:
+                    outcome['stop'] = 'relight_unconfirmed'
                     break
                 continue
             if not progress(data, kind) or progress(data, kind)[0] <= before:
+                outcome['stop'] = 'no_confirmed_progress'
                 LOG.warning('No confirmed %s progress for room %s; stopping this action', kind, room_id)
                 break
     return data
@@ -790,8 +813,10 @@ def run_account_queue(account, day, deadline, ledger, settings):
                     checkpoint(room)
                     continue
                 # Sui interactions first; bounded watch sessions overlap the room scan.
-                rounds = 10 if room == SUI_ROOM or live_statuses.get(room) == 1 or row['relight_only'] else 1
-                data = free_actions(client, room, uid, data, day, deadline, rounds)
+                # Finish this room's available interactions before spending the
+                # remaining budget on the roster tail. Relighting has its own cap.
+                data = free_actions(client, room, uid, data, day, deadline, 10,
+                                    row.setdefault('actions', {}))
                 row['after'] = summary(data)
                 row.update(after_lighted=data.get('is_lighted'),
                            relight_pending=any(relight_task(data,k) for k in ('like','sendDanmu')))
@@ -820,7 +845,8 @@ def run_account_queue(account, day, deadline, ledger, settings):
                     continue
                 try:
                     data = client.tasks(uid)
-                    data = free_actions(client,room,uid,data,day,deadline,1)
+                    data = free_actions(client,room,uid,data,day,deadline,1,
+                                        row.setdefault('actions', {}))
                     updated = merge_progress(row['after'], summary(data))
                     changed |= updated != row['after']
                     row['after'] = updated
@@ -1014,6 +1040,7 @@ def handler(event, context):
                           'accounts': [{'uid': int(a['uid']), 'other_medals': bool(a.get('other_medals'))}
                                        for a in accounts]},
                 'pacing': PACING,
+                'interaction_policy': 'finish_available_room_tasks_v1',
                 'danmaku_policy': 'offline_only_all_rooms',
                 'credential_policy': 'daily_refresh_encrypted_obs' if settings.get('ENABLE_COOKIE_REFRESH') == 'true'
                                      else 'static_cookie_refresh_disabled',

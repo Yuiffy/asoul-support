@@ -28,11 +28,13 @@ class RelightTests(unittest.TestCase):
         c.room.return_value={'uid':11,'live_status':status}
         return c
 
-    def test_live_unlit_medal_likes_once_then_exposes_daily_tasks(self,_):
+    def test_live_unlit_medal_has_separate_relight_and_daily_rounds(self,_):
         c=self.client(1)
-        c.tasks.return_value=lit()
+        daily=lit(); daily['task_info'][2]['sub_title']='每日上限 1/10'
+        c.tasks.side_effect=[lit(), daily]
         result=cloud.free_actions(c,1,11,unlit(),cloud.today(),time.monotonic()+60,1)
-        c.like.assert_called_once_with(1,11,30)
+        self.assertEqual(c.like.call_count,2)
+        self.assertTrue(all(call.args==(1,11,30) for call in c.like.call_args_list))
         c.danmu.assert_not_called()
         self.assertTrue(result['is_lighted'])
         self.assertTrue(cloud.pending(result,'watchLive'))
@@ -53,21 +55,39 @@ class RelightTests(unittest.TestCase):
     def test_after_relighting_live_room_continues_available_daily_like_rounds(self,_):
         c=self.client(1)
         responses=[lit()]
-        for n in range(1,10):
+        for n in range(1,11):
             d=lit(); d['task_info'][2]['sub_title']=f'每日上限 {n}/10'
             responses.append(d)
         c.tasks.side_effect=responses
         result=cloud.free_actions(c,1,11,unlit(),cloud.today(),time.monotonic()+60,10)
-        self.assertEqual(c.like.call_count,10)
-        self.assertEqual(cloud.summary(result)['like'],[9,10])
+        self.assertEqual(c.like.call_count,11)
+        self.assertEqual(cloud.summary(result)['like'],[10,10])
         c.danmu.assert_not_called()
 
     def test_offline_ten_messages_can_relight_without_incremental_api_counter(self,_):
         c=self.client(0)
-        c.tasks.side_effect=[unlit() for _ in range(9)]+[lit()]
+        full=lit(); full['task_info'][1]['sub_title']='每日上限 10/10'
+        c.tasks.side_effect=[unlit() for _ in range(9)]+[full]
         cloud.free_actions(c,1,11,unlit(),cloud.today(),time.monotonic()+60,10)
         self.assertEqual(c.danmu.call_count,10)
         c.like.assert_not_called()
+
+    def test_relighting_does_not_consume_daily_danmaku_round_budget(self,_):
+        c=self.client(0)
+        responses=[unlit() for _ in range(9)] + [lit()]
+        for n in range(1,11):
+            data=lit(); data['task_info'][1]['sub_title']=f'每日上限 {n}/10'
+            responses.append(data)
+        c.tasks.side_effect=responses
+        result=cloud.free_actions(c,1,11,unlit(),cloud.today(),time.monotonic()+60,10)
+        self.assertEqual(c.danmu.call_count,20)
+        self.assertEqual(cloud.summary(result)['sendDanmu'],[10,10])
+
+    def test_unconfirmed_relight_is_bounded_to_ten_messages(self,_):
+        c=self.client(0)
+        c.tasks.return_value=unlit()
+        cloud.free_actions(c,1,11,unlit(),cloud.today(),time.monotonic()+60,10)
+        self.assertEqual(c.danmu.call_count,10)
 
     def test_offline_relight_stops_as_soon_as_room_goes_live(self,_):
         c=self.client(0)

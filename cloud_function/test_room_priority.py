@@ -30,7 +30,7 @@ class RoomPriorityTests(unittest.TestCase):
         with patch('index.Bili',return_value=client),patch('index.maybe_gift',return_value='already_done'),patch('index.free_actions',side_effect=free):
             meta,rows=cloud.run_account_queue({'uid':123,'cookie':'unused','other_medals':True},cloud.today(),time.monotonic()+60,Ledger(),{})
         self.assertNotIn('status',meta)
-        self.assertEqual(sequence,[(cloud.SUI_ROOM,10),(2,10),(1,1)])
+        self.assertEqual(sequence,[(cloud.SUI_ROOM,10),(2,10),(1,10)])
         self.assertEqual([r['room'] for r in rows],[cloud.SUI_ROOM,2,1])
 
     def test_batch_get_uses_repeated_uids_and_checks_room_identity(self):

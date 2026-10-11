@@ -24,7 +24,14 @@ rounds first. Remaining rooms are classified with a per-run batch GET (up to50
 streamer UIDs per request), so live rooms get their available like rounds before
 offline rooms get danmaku. Replay/unknown rooms are last. Ordering snapshots never
 authorize an action: likes, watch and especially offline-only danmaku still check
-current room state. Completed rooms are absent from the batch query. Then up to8
+current room state. Each visited room gets up to ten available daily interaction
+rounds before advancing to the next room, including ordinary offline rooms.
+Offline daily danmaku no longer depend on a whole-roster scan and later sweeps
+finishing inside the run deadline. Relighting has a separate cap (one like batch
+or ten danmaku), so changing from the relight schema to numeric daily tasks does
+not consume those daily rounds. Both phases stop on the shared deadline, room
+state changes, storage-full daily tasks or unconfirmed numeric progress.
+Completed rooms are absent from the batch query. Then up to8
 watch workers run alongside the remaining room scan
 and interaction sweeps, sharing the same account-wide request/pacing gate. Watch
 sessions overlap their wait periods; actual HTTP calls stay serialized. Each room
@@ -91,6 +98,13 @@ deduplicated by room and task, reconstructed from the existing schema1 journal, 
 reset with the daily policy journal. Missing/relight-only/zero-limit values never
 count as full. `progress_state.individual_daily_caps` uses these same cumulative
 counts, including rooms already removed from the remaining queue.
+
+WeCom also separates accepted like batches/danmaku messages from confirmed task
+credit, and reports rooms stopped because a numeric counter did not increase.
+Per-room results contain `actions` with accepted counts and stop reasons; these
+diagnostics do not authorize retries or change the persisted journal schema.
+Sui's partial like task includes its known stop reason when available. Health
+exposes `interaction_policy=finish_available_room_tasks_v1` to identify this fix.
 
 This queue does not guarantee all medals reach all three caps in one day. Live
 rooms receive likes and watching but no danmaku; offline/loop rooms receive only

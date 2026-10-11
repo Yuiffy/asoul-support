@@ -22,6 +22,28 @@ class Clock:
 
 
 class PacingTests(unittest.TestCase):
+    @patch('index.time.sleep')
+    def test_no_counter_growth_is_reported_without_another_like_post(self,_):
+        client=Mock()
+        client.gate=cloud.AccountGate()
+        client.room.return_value={'uid':11,'live_status':1}
+        data={'task_info':[{'jump_type':'like','title':'点赞30次','sub_title':'每日上限 5/10'}]}
+        client.tasks.return_value=data
+        audit={}
+        cloud.free_actions(client,1,11,data,cloud.today(),time.monotonic()+60,10,audit)
+        client.like.assert_called_once_with(1,11,30)
+        self.assertEqual(audit['like'],{'accepted':1,'stop':'no_confirmed_progress'})
+
+    def test_offline_partial_likes_have_an_explicit_reason_and_no_post(self):
+        client=Mock()
+        client.gate=cloud.AccountGate()
+        client.room.return_value={'uid':11,'live_status':0}
+        data={'task_info':[{'jump_type':'like','title':'点赞30次','sub_title':'每日上限 5/10'}]}
+        audit={}
+        cloud.free_actions(client,1,11,data,cloud.today(),time.monotonic()+60,10,audit)
+        client.like.assert_not_called()
+        self.assertEqual(audit['like'],{'accepted':0,'stop':'not_live'})
+
     def frequency_probe(self, rejections=1, deadline_seconds=300, live_after_wait=False,
                         risk_during_wait=False, task_full_after_wait=False):
         clock = Clock()

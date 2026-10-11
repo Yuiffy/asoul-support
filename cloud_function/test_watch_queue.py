@@ -39,7 +39,7 @@ class WatchQueueTests(unittest.TestCase):
             finally:
                 with lock:
                     active-=1
-        def free(client,room,uid,data,day,deadline,max_rounds):
+        def free(client,room,uid,data,day,deadline,max_rounds,audit=None):
             if room!=cloud.SUI_ROOM:
                 if not sui_started.wait(5):
                     raise AssertionError('Sui was not queued first')

@@ -88,6 +88,14 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         cumulative = identity.get('daily_task_completed_rooms')
         if cumulative is not None:
             lines.append(f'今日累计单项已满：点赞{cumulative.get("like",0)}间；弹幕{cumulative.get("sendDanmu",0)}间；观看{cumulative.get("watchLive",0)}间')
+        if any('actions' in row for row in rows):
+            counts = {kind: sum(row.get('actions',{}).get(kind,{}).get('accepted',0)
+                               for row in rows) for kind in ('like','sendDanmu')}
+            lines.append(f'本轮接口接受：点赞{counts["like"]}批；弹幕{counts["sendDanmu"]}条（含点亮，不等于亲密度入账）')
+            stalled = {kind: sum(row.get('actions',{}).get(kind,{}).get('stop') == 'no_confirmed_progress'
+                                for row in rows) for kind in ('like','sendDanmu')}
+            if any(stalled.values()):
+                lines.append(f'计数未增长而停止：点赞{stalled["like"]}间；弹幕{stalled["sendDanmu"]}间')
         if 'live_priority_rooms' in identity:
             lines.append(f'排序时其他开播房间{identity["live_priority_rooms"]}间；未播或轮播不观看、不点赞')
         lines.append('最多8间并行观看；每间每轮最多16分钟，岁己同样轮换；心跳成功不等于任务已满')
@@ -122,6 +130,14 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
                 value = sui['after'].get(kind)
                 values.append(label + ('/'.join(map(str,value)) if value else '未知'))
             lines.append('岁己：' + '，'.join(values))
+            stops = {'not_live':'未开播', 'storage_full':'储蓄满',
+                     'no_confirmed_progress':'请求已接受但计数未增长',
+                     'unknown_task':'任务计数未知', 'deadline':'本轮时间用尽',
+                     'endpoint_paused':'接口已暂停', 'round_budget':'本次次数用尽',
+                     'relight_unconfirmed':'点亮未确认', 'unknown_round_count':'次数要求未知'}
+            stop = sui.get('actions',{}).get('like',{}).get('stop')
+            if stop in stops:
+                lines.append('岁己点赞暂未补满：' + stops[stop])
             gift = sui.get('gift')
             if gift == 'confirmed':
                 lines.append('本轮确认补送1个灯牌（最多1电池）')

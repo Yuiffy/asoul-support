@@ -8,6 +8,37 @@ from test_cloud import Ledger
 
 
 class QueueTests(unittest.TestCase):
+    def test_offline_daily_danmaku_finishes_before_scan_deadline(self):
+        clock = [1000.0]
+        client = Mock(uid=123, watch_seconds=0)
+        client.gate = cloud.AccountGate()
+        client.login.return_value = {'uid':123}
+        client.medal_rooms.return_value = {1:11, 2:22}
+        client.live_statuses.return_value = {1:0, 2:0}
+        client.room.side_effect = lambda room: {'uid':11 if room==1 else 22, 'live_status':0}
+        accepted = {1:0, 2:0}
+        def tasks(uid):
+            if uid==cloud.SUI_UID:
+                return {'task_info':[], 'reach_free_intimacy_limit':True}
+            if uid==22:
+                return {'is_lighted':False, 'task_info':[
+                    {'jump_type':'sendDanmu','title':'发弹幕10次','sub_title':'仅点亮','is_done':False},
+                    {'jump_type':'like','title':'点赞30次','sub_title':'仅点亮','is_done':False}]}
+            return {'task_info':[{'jump_type':'sendDanmu', 'title':'发弹幕',
+                                  'sub_title':f'每日上限 {accepted[1]}/10'}]}
+        def send(room, text):
+            accepted[room] += 1
+            clock[0] += 8
+            return True
+        client.tasks.side_effect = tasks
+        client.danmu.side_effect = send
+        with patch('index.time.monotonic',side_effect=lambda:clock[0]), patch('index.time.sleep'), \
+                patch('index.Bili',return_value=client), patch('index.maybe_gift',return_value='already_done'):
+            meta, rows = cloud.run_account_queue({'uid':123,'cookie':'unused','other_medals':True},
+                cloud.today(),1080,Ledger(),{})
+        self.assertEqual(accepted[1],10)
+        self.assertEqual(next(r for r in rows if r['room']==1)['after']['sendDanmu'],[10,10])
+
     def test_risk_rejection_stops_all_later_account_requests(self):
         gate = cloud.AccountGate()
         client = cloud.Bili('SESSDATA=secret1234; bili_jct=csrf1234',123,gate)

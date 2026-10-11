@@ -5,6 +5,16 @@ from wecom_notify import events, send_notice
 
 
 class WeComTests(unittest.TestCase):
+    def test_accepted_actions_and_stalled_counters_are_separate_from_completions(self):
+        rows=[{'room':25788785,'account':{'uid':123},'after':{'like':[5,10]},
+               'actions':{'like':{'accepted':2,'stop':'no_confirmed_progress'},
+                          'sendDanmu':{'accepted':10,'stop':'full'}}}]
+        text=events('2026-10-11',[],rows,123)[0][1]
+        self.assertIn('本轮接口接受：点赞2批；弹幕10条',text)
+        self.assertIn('计数未增长而停止：点赞1间；弹幕0间',text)
+        self.assertIn('岁己点赞暂未补满：请求已接受但计数未增长',text)
+        self.assertIn('弹幕0间；点赞0间',text)
+
     def test_daily_single_task_counts_are_distinct_from_this_round_and_all_task_counts(self):
         identities = [{'account':{'uid':123}, 'daily_completed_rooms':0,
             'cached_completed_rooms':0,'daily_task_completed_rooms':{'like':15,'sendDanmu':80,'watchLive':2},
