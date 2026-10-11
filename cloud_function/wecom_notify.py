@@ -90,6 +90,7 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
             lines.append(f'今日累计单项已满：点赞{cumulative.get("like",0)}间；弹幕{cumulative.get("sendDanmu",0)}间；观看{cumulative.get("watchLive",0)}间')
         if 'live_priority_rooms' in identity:
             lines.append(f'排序时其他开播房间{identity["live_priority_rooms"]}间；未播或轮播不观看、不点赞')
+        lines.append('最多8间并行观看；每间每轮最多16分钟，岁己同样轮换；心跳成功不等于任务已满')
         if 'cached_completed_rooms' in identity:
             lines.append(f'今日累计完成{identity.get("daily_completed_rooms",0)}间；已完成直接跳过{identity["cached_completed_rooms"]}间；剩余队列{identity.get("remaining_rooms",0)}间')
         lines.append(f'尚未检查{identity.get("pending_rooms",0)}间；已检查但未满{identity.get("incomplete_rooms",0)}间')

@@ -40,7 +40,8 @@ COOKIE_INFO = 'https://passport.bilibili.com/x/passport-login/web/cookie/info'
 PACING = {'query_seconds': [1.5, 2.0], 'like_seconds': [15, 20],
           'danmaku_seconds': [6, 8], 'heartbeat': 'server_interval',
           'danmaku_frequency_backoff_seconds': [60, 120],
-          'priority': 'sui_then_live_then_offline', 'watch_workers_per_account': 1}
+          'priority': 'sui_then_live_then_offline', 'watch_workers_per_account': 8,
+          'watch_session_seconds': 960}
 
 
 class TaskError(RuntimeError):
@@ -641,11 +642,11 @@ def watch(client, room_id, uid, data, day, deadline):
         raise TaskError('No Bilibili-issued device ID')
     device = [buvid, str(uuid.uuid4())]
     ids = [int(info['parent_area_id']), int(info['area_id']), 0, room_id]
-    watch_deadline = min(deadline, time.monotonic() + (9600 if uid == SUI_UID else 960))
+    watch_deadline = min(deadline, time.monotonic() + PACING['watch_session_seconds'])
     deadline = watch_deadline
     state = enter(client.trace, ids, device, uid)
     seq, last_check, last_progress, stalled = 1, time.monotonic(), progress(data, 'watchLive')[0], 0
-    while alive(day, deadline):
+    while alive(day, deadline) and not client.gate.stopped:
         interval = int(state['heartbeat_interval'])
         if not 5 <= interval <= 300 or any(r not in range(6) for r in state['secret_rule']):
             raise TaskError('Unsupported heartbeat parameters')
@@ -655,10 +656,10 @@ def watch(client, room_id, uid, data, day, deadline):
             raise TaskError('Heartbeat chain expired')
         if time.monotonic() + max(0, delay) + 20 >= deadline:
             break
-        while delay > 0 and alive(day, deadline):
+        while delay > 0 and alive(day, deadline) and not client.gate.stopped:
             time.sleep(min(delay, 1))
             delay = next_at - time.time()
-        if not alive(day, deadline):
+        if not alive(day, deadline) or client.gate.stopped:
             break
         ids[2] = seq
         state = heartbeat(client.trace, ids, device, uid, state)
@@ -678,6 +679,9 @@ def watch(client, room_id, uid, data, day, deadline):
             if stalled >= 7:
                 LOG.warning('Watch progress did not increase for 21 minutes in room %s', room_id)
                 break
+    # Keep already verified progress without requesting after a shared stop/deadline.
+    if client.gate.stopped or not alive(day, deadline):
+        return data
     return client.tasks(uid)
 
 
@@ -693,7 +697,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
     metadata = {'account': identity, 'pending_rooms': 0}
     rows = {}
     daily = None
-    watch_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    watch_pool = concurrent.futures.ThreadPoolExecutor(max_workers=PACING['watch_workers_per_account'])
     try:
         daily = DailyProgress(ledger, account, settings, day)
         if daily.header:
@@ -785,7 +789,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                 if row['storage_full'] and not row['relight_only']:
                     checkpoint(room)
                     continue
-                # Sui interactions first; one watch worker then overlaps the room scan.
+                # Sui interactions first; bounded watch sessions overlap the room scan.
                 rounds = 10 if room == SUI_ROOM or live_statuses.get(room) == 1 or row['relight_only'] else 1
                 data = free_actions(client, room, uid, data, day, deadline, rounds)
                 row['after'] = summary(data)
@@ -827,7 +831,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                     checkpoint(room)
             if not changed or gate.stopped or not alive(day,deadline):
                 break
-        # All watch sessions share the deadline and account gate; only one runs at a time.
+        # Concurrent sessions share the deadline and a serialized account request gate.
         for room, future in watch_targets:
             collect_watch(room, future)
         metadata['paused_by_risk'] = gate.risk_code in (-352, -412)

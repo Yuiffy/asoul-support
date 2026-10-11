@@ -24,13 +24,15 @@ rounds first. Remaining rooms are classified with a per-run batch GET (up to50
 streamer UIDs per request), so live rooms get their available like rounds before
 offline rooms get danmaku. Replay/unknown rooms are last. Ordering snapshots never
 authorize an action: likes, watch and especially offline-only danmaku still check
-current room state. Completed rooms are absent from the batch query. Then a single
-watch worker runs alongside the remaining room scan
+current room state. Completed rooms are absent from the batch query. Then up to8
+watch workers run alongside the remaining room scan
 and interaction sweeps, sharing the same account-wide request/pacing gate. Watch
-sessions run one at a time, with Sui's session queued first. Only the main queue
+sessions overlap their wait periods; actual HTTP calls stay serialized. Each room
+maintains its own UUID, heartbeat chain, sequence and server interval. Sui's
+session is queued first but has the same960second cap as other rooms. Only the main queue
 thread appends daily checkpoints; watch results merge without decreasing already
 confirmed interaction progress. Queued sessions skip login after risk or deadline.
-This keeps a long Sui watch from blocking all other room interactions. Offline-only
+This overlaps live-room viewing without extending one room's session. Offline-only
 danmaku still applies to every room. Offline tasks stay pending. Overall timeout,
 midnight or risk stops work; completing a scan does not imply daily caps are met.
 
@@ -92,10 +94,12 @@ counts, including rooms already removed from the remaining queue.
 
 This queue does not guarantee all medals reach all three caps in one day. Live
 rooms receive likes and watching but no danmaku; offline/loop rooms receive only
-danmaku. Some task schemas only expose relighting. Watching is serial per account;
-other rooms get at most960seconds per session, Sui at most9600seconds, both further
-limited by the6600second execution deadline and live/progress checks. Overlapping
-the room scan improves interaction throughput but does not parallelize watching.
+danmaku. Some task schemas only expose relighting. Watching uses at most8 concurrent
+sessions per account, each capped960seconds, further limited by the6600second
+execution deadline and live/progress checks. Later sessions wait for an available
+worker and skip login after deadline or risk. Every actual API request retains the
+shared pacing gate. More watchers improve coverage but do not prove concurrent
+task credit or guarantee all200 rooms finish; rely on confirmed task counters.
 
 Journal appends use the current byte position. A stale writer or uncertain append
 stops the queue; a fresh invocation reloads and reconciles persisted records. A
