@@ -23,7 +23,8 @@ from asoul_x25kn import enter, heartbeat
 from wecom_notify import report, send_notice
 from daily_progress import DailyProgress, ProgressError
 from run_schedule import INTERVAL_SECONDS, MAX_RUN_SECONDS, CLOUD_TIMEOUT_SECONDS, reservation_slots
-from room_priority import prioritize, select_like_targets
+from room_priority import (prioritize, adaptive_like_plan, LIKE_POLICY_VERSION,
+                           LIKE_MIN_ROOMS, LIKE_BASE_LIMIT, LIKE_PROBE_LIMIT)
 from relight_rules import relight_task
 from credential_refresh import CredentialError, EncryptedJournal, RefreshTransport, maintain
 
@@ -257,6 +258,7 @@ class Bili:
         self.watch_seconds = 0
         self.medal_levels = {}
         self.like_budget = None
+        self.like_observer = None
         self.opener = urllib.request.build_opener(NoRedirect())
 
     def request(self, url, params=None, method='GET', signed=False, form=None):
@@ -629,6 +631,7 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds, audit=No
                 outcome['stop'] = 'not_live' if kind == 'like' else 'not_offline'
                 break
             before = progress(data, kind)[0] if not relight_count else None
+            before_like = summary(data)['like'] if kind == 'like' else None
             if kind == 'like':
                 if relight_count:
                     count = relight_count
@@ -652,6 +655,8 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds, audit=No
                     outcome['stop'] = 'send_not_attempted'
                     break
             outcome['accepted'] += 1
+            if kind == 'like':
+                outcome['accepted_clicks'] = outcome.get('accepted_clicks', 0) + count
             if relight_count:
                 relight_rounds += 1
             else:
@@ -659,9 +664,16 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds, audit=No
             # Give counters time to update; the account-wide gate still controls
             # sends across rooms, including the final offline check after waiting.
             time.sleep(3 if kind == 'sendDanmu' else 10)
-            data = client.tasks(uid)
+            try:
+                data = client.tasks(uid)
+            except TaskError:
+                if kind == 'like' and client.like_observer is not None:
+                    client.like_observer(room_id, count, before_like, None)
+                raise
             if kind == 'like':
                 verified = progress(data, kind)
+                if client.like_observer is not None:
+                    client.like_observer(room_id, count, before_like, summary(data)['like'])
                 LOG.info('Like batch room=%s clicks=%s before=%s after=%s',
                          room_id, count, before, verified[:2] if verified else None)
                 if not relight_count and (not verified or
@@ -785,14 +797,17 @@ def run_account_queue(account, day, deadline, ledger, settings):
             daily.initialize(identity, roster, len(medals))
             metadata.update(medal_rooms_total=len(medals), eligible_rooms=len(roster),
                             cached_completed_rooms=0, queue_source='daily_full')
-        if daily.like_targets is None:
-            # Old journals gain a plan without resetting task or gift history.
-            if not fresh_roster and account.get('other_medals'):
-                client.medal_rooms()
-            levels = client.medal_levels if isinstance(client.medal_levels, dict) else {}
-            daily.set_like_plan(select_like_targets(daily.header['targets'], levels))
+        # Recompute the threshold from ALL held medals each run, regardless of
+        # live status. Keep the existing journal/attempt budget during upgrades.
+        if not fresh_roster and account.get('other_medals'):
+            client.medal_rooms()
+        levels = client.medal_levels if isinstance(client.medal_levels, dict) else {}
+        daily.update_like_plan(adaptive_like_plan(daily.header['targets'], levels))
         client.like_budget = daily.reserve_like
+        client.like_observer = daily.record_like_result
         metadata['like_target_rooms'] = daily.like_targets
+        metadata['like_level_threshold'] = daily.like_plan['threshold']
+        metadata['like_attempted_click_limit'] = daily.like_limit
         targets = daily.remaining()
 
         def checkpoint(room):
@@ -932,7 +947,23 @@ def run_account_queue(account, day, deadline, ledger, settings):
     if daily is not None and daily.header is not None:
         metadata.update(daily_completed_rooms=len(daily.done), remaining_rooms=len(daily.remaining()),
                         daily_task_completed_rooms=daily.task_counts(),
-                        like_reserved_clicks=daily.like_reserved_clicks)
+                        like_reserved_clicks=daily.like_reserved_clicks,
+                        like_attempted_click_limit=daily.like_limit,
+                        like_probe=daily.like_probe_summary())
+        stops = {}
+        for row in rows.values():
+            stop = row.get('actions', {}).get('like', {}).get('stop')
+            if stop:
+                stops[stop] = stops.get(stop, 0) + 1
+        metadata['like_stop_rooms'] = stops
+        try:
+            daily.record_run_summary({'timestamp': int(time.time()),
+                'status': metadata.get('status', 'finished'), 'reason': metadata.get('reason'),
+                'risk_code': gate.risk_code, 'like_stops': stops,
+                'like_reserved_clicks': daily.like_reserved_clicks,
+                'task_counts': daily.task_counts()})
+        except ProgressError as exc:
+            metadata.update(status='error', reason=str(exc))
     return metadata, list(rows.values())
 
 
@@ -1071,8 +1102,12 @@ def handler(event, context):
                            'storage_full_rooms': sum(bool(row.get('storage_full')) for row in state.observed.values()),
                            'individual_daily_caps': state.task_counts(),
                            'like_target_rooms': state.like_targets,
+                           'like_plan': state.like_plan,
                            'like_reserved_clicks': state.like_reserved_clicks,
-                           'like_attempted_click_limit': 5000})
+                           'like_attempted_click_limit': state.like_limit,
+                           'like_probe': state.like_probe_summary(),
+                           'recent_like_batches': state.like_results[-20:],
+                           'recent_run_summaries': state.run_summaries[-12:]})
         return {'version': 'queue-v5-refresh', 'day': today(), 'accounts': result}
     if event.get('mode') == 'notify_test':
         ledger = ObsLedger(context, settings.get('OBS_BUCKET', ''))
@@ -1095,13 +1130,21 @@ def handler(event, context):
                              'required_max_instances': 1, 'required_request_concurrency': 1},
                 'scope': {'active_account_uids': [int(a['uid']) for a in accounts],
                           'sui_only': all(not a.get('other_medals') for a in accounts),
-                          'accounts': [{'uid': int(a['uid']), 'other_medals': bool(a.get('other_medals'))}
+                          'accounts': [{'uid': int(a['uid']), 'other_medals': bool(a.get('other_medals')),
+                                        'paid_gift_allowed': a.get('role') == 'primary'
+                                            and a.get('allow_paid') is True
+                                            and str(a['uid']) == settings.get('PAID_ACCOUNT_UID')
+                                            and settings.get('ENABLE_PAID_GIFT') == 'true'}
                                        for a in accounts]},
                 'pacing': PACING,
                 'interaction_policy': 'finish_available_room_tasks_v1',
-                'like_policy': {'version': 'priority_lowest15_v1', 'other_rooms': 15,
-                                'batch': 'task_title_count', 'daily_attempted_click_limit': 5000,
-                                'selection': 'fixed_daily_verified_medal_level'},
+                'like_policy': {'version': LIKE_POLICY_VERSION, 'minimum_threshold_rooms': LIKE_MIN_ROOMS,
+                                'batch': 'task_title_count', 'base_attempted_click_limit': LIKE_BASE_LIMIT,
+                                'daily_attempted_click_limit': LIKE_PROBE_LIMIT,
+                                'selection': 'all_held_medals_threshold_including_ties',
+                                'execution': 'live_only_priority_then_lowest_level',
+                                'probe': 'unfinished_tasks_only_above_5000',
+                                'batch_evidence': 'obs_before_after_and_run_risk'},
                 'danmaku_policy': 'offline_only_all_rooms',
                 'credential_policy': 'daily_refresh_encrypted_obs' if settings.get('ENABLE_COOKIE_REFRESH') == 'true'
                                      else 'static_cookie_refresh_disabled',

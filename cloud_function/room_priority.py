@@ -1,5 +1,28 @@
 """Stable room ordering from one per-run live-status snapshot, without IO."""
 
+LIKE_POLICY_VERSION = 'adaptive_lowest50_v2'
+LIKE_MIN_ROOMS = 50
+LIKE_BASE_LIMIT = 5000
+LIKE_PROBE_LIMIT = 6000
+
+
+def adaptive_like_plan(targets, levels, priority_room=25788785, minimum=LIKE_MIN_ROOMS):
+    """Choose the level of the Nth medal across the roster, including all ties.
+
+    Offline medals participate in the threshold; live status is an action gate,
+    not a reason to widen the threshold to higher-level medals.
+    """
+    rooms = {room for room, _ in targets}
+    candidates = sorted((levels[room], room) for room in rooms
+                        if type(levels.get(room)) is int and 0 < levels[room] <= 120)
+    threshold = candidates[min(minimum, len(candidates)) - 1][0] if candidates else None
+    eligible = [(level, room) for level, room in candidates if level <= threshold]
+    selected = ([priority_room] if priority_room in rooms else []) + [
+        room for _, room in eligible if room != priority_room]
+    return {'version': LIKE_POLICY_VERSION, 'rooms': selected, 'threshold': threshold,
+            'levels': [[room, level] for level, room in eligible],
+            'minimum_rooms': minimum, 'verified_rooms': len(candidates)}
+
 
 def select_like_targets(targets, levels, priority_room=25788785, count=15):
     """Fixed daily selection; unknown levels never outrank verified low medals."""

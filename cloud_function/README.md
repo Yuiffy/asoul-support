@@ -321,14 +321,21 @@ individual task and all-three-task counts still require verified API counters.
 The health build marker is `queue-v5-refresh`; OBS admission and gift namespaces
 remain unchanged, preserving existing reservations.
 
-## Daily low-medal like selection
+## Adaptive low-medal like selection
 
-Health exposes `like_policy.version=priority_lowest15_v1`. Each Shanghai day,
-select the fixed priority room plus at most 15 other rooms with the lowest
-verified medal levels, breaking ties by room ID. Unknown levels are excluded.
-The plan is persisted for the day; offline selected rooms are not replaced with
-other live rooms. Priority room runs first, then selected live rooms, other live
-rooms, and offline rooms. Every action still verifies current room status.
+Health exposes `like_policy.version=adaptive_lowest50_v2`. Each run refreshes
+verified medal levels for the account's daily roster. The level of the 50th
+lowest medal defines threshold x; every medal at or below x is eligible, including
+ties. With fewer than 50 verified medals, use all of them. **All held medals**
+participate, including offline rooms; unknown levels are excluded. The fixed
+priority room is always eligible regardless of level. This threshold may leave
+unused budget when low-level rooms never go live; it is not widened by live status.
+
+Persist the updated plan and level evidence without resetting today's attempts,
+task history or gift reservations. Previously completed watch/chat-only rooms
+are reopened if newly eligible for an unfinished like task. Priority room runs
+first, then selected live rooms ordered by level and room ID, other live rooms,
+and offline rooms. Every action still verifies current room status.
 Rooms outside the like plan receive no like POST, including relighting likes,
 but retain offline danmaku and live watch tasks.
 
@@ -336,16 +343,25 @@ Likes use the task title's round count (normally 30) per POST, with 15–20 seco
 account-wide cooldowns. An unchanged but known counter can finish only the
 initially verified remaining batches. No same-invocation sweep resends that
 plan. Single-POST 300-click experiments have not confirmed task credit and are
-not enabled in production. Logs record room ID, submitted count and before/after
-task counters without credentials; acceptance is not credited as completion.
+not enabled in production. OBS `like_result` records persist room ID, submitted
+count, cumulative reserved count and before/after task counters without credentials.
+Acceptance is not credited as completion. Accepted POSTs whose subsequent counter
+query fails retain an unknown after value; absent results remain uncertain.
 
 Before every queued like POST, append an OBS `like_attempt` reservation. Each
-account's current daily journal permits at most 5000 attempted clicks, including
-failed/uncertain outcomes. This local budget cannot include manual actions,
-other tools or pre-upgrade requests, and is not a guaranteed Bilibili quota.
-`progress_state` returns the fixed rooms and reserved click count for inspection.
-Midday upgrades preserve the existing roster, progress and gift reservations;
-new plans and budgets reset with the next day's journal.
+account's current daily journal permits 5000 base attempted clicks plus at most
+1000 experimental clicks (6000 total), including failed/uncertain outcomes.
+Experiments only submit verified unfinished tasks; never send to full tasks just
+to exhaust the budget. Existing account risk stops still apply. The probe summary
+separates reservations, fully post-5000 accepted batches and observed counter
+increases; mixed batches crossing 5000 do not prove post-boundary credit. Counter
+latency and manual/other-tool activity prevent inferring a universal quota.
+This local budget cannot include manual actions, other tools or requests before
+budget tracking, and neither 5000 nor 6000 is a guaranteed Bilibili quota.
+`progress_state` returns the current plan, level threshold, reserved clicks,
+probe summary, 20 recent batches and 12 run summaries including risk/stop reasons.
+Midday upgrades retain the old fixed plan's reservations; the next adaptive plan
+opens only the extra 1000 attempts. Budgets reset with the next Shanghai day.
 
 Queue completion requires watch/danmaku/like caps for selected rooms and only
 watch/danmaku caps outside that plan; the paid target additionally requires its
@@ -353,10 +369,18 @@ lamp cap. WeCom labels this as policy completion and separately reports real
 individual task caps and all-three-task caps. It does not promise every room
 will complete, since tasks depend on live status and platform settlement.
 
-The journal now includes `like_plan` and `like_attempt` records. Older readers
-cannot parse these records: a rollback must retain the updated journal reader
+The journal includes legacy `like_plan`, `like_attempt`, `adaptive_like_plan`,
+`like_result` and `run_summary` records. Older readers cannot parse the new records:
+a rollback must retain the updated journal reader
 and task policy, or wait until a fresh day's journal. Do not delete current
 progress or gift reservations to work around a rollback.
+
+Accounts have independent OBS budgets, credential journals, request gates and
+risk stops. Enable a configured secondary account via `ACTIVE_ACCOUNT_UIDS` and
+import a fresh matching Cookie/refresh token if its login expired. Secondary
+accounts remain free-only regardless of accidental paid flags. WeCom splits
+long reports into independently deduplicated 2000-byte messages so both account
+summaries survive; successful first-part delivery does not suppress later parts.
 
 ## Request rejection diagnostics
 

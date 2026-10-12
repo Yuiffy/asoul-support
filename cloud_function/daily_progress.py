@@ -4,6 +4,7 @@ The gift reservation is deliberately separate and is never reset by this cache.
 """
 import hashlib
 import json
+from room_priority import LIKE_POLICY_VERSION, LIKE_BASE_LIMIT, LIKE_PROBE_LIMIT
 
 
 class ProgressError(RuntimeError):
@@ -43,6 +44,9 @@ class DailyProgress:
         self.key = f'runs/daily/{self.policy["uid"]}/{day}-{signature}.jsonl'
         self.header, self.done, self.observed, self.position = None, {}, {}, 0
         self.like_targets, self.like_reserved_clicks = None, 0
+        self.like_plan = None
+        self.like_results, self.run_summaries = [], []
+        self.last_like_attempt = None
         self.task_done = {kind: set() for kind in ('watchLive', 'sendDanmu', 'like')}
         try:
             raw = ledger.read_progress(self.key)
@@ -78,13 +82,29 @@ class DailyProgress:
                         raise ValueError('Invalid like plan')
                     self.like_targets = selected
                     continue
+                if row.get('type') == 'adaptive_like_plan':
+                    self._validate_like_plan(row['plan'], by_room)
+                    self.like_plan = row['plan']
+                    self.like_targets = self.like_plan['rooms']
+                    self._reopen_like_rooms()
+                    continue
                 if row.get('type') == 'like_attempt':
                     count = row.get('clicks')
                     if (self.like_targets is None or row.get('room') not in self.like_targets
                             or type(count) is not int or not 1 <= count <= 300
-                            or self.like_reserved_clicks + count > 5000):
+                            or self.like_reserved_clicks + count > self.like_limit):
                         raise ValueError('Invalid like reservation')
                     self.like_reserved_clicks += count
+                    self.last_like_attempt = (row['room'], count, self.like_reserved_clicks)
+                    continue
+                if row.get('type') == 'like_result':
+                    self._validate_like_result(row)
+                    self.like_results.append(row)
+                    continue
+                if row.get('type') == 'run_summary':
+                    if not isinstance(row.get('summary'), dict):
+                        raise ValueError('Invalid run summary')
+                    self.run_summaries.append(row['summary'])
                     continue
                 room = row['room']
                 if room not in by_room or row.get('type') not in ('complete', 'pending'):
@@ -137,16 +157,91 @@ class DailyProgress:
         self._append({'type': 'like_plan', 'rooms': list(rooms)})
         self.like_targets = list(rooms)
 
+    @property
+    def like_limit(self):
+        return LIKE_PROBE_LIMIT if self.like_plan else LIKE_BASE_LIMIT
+
+    def _validate_like_plan(self, plan, roster):
+        rooms, levels = plan.get('rooms'), plan.get('levels')
+        threshold = plan.get('threshold')
+        if (plan.get('version') != LIKE_POLICY_VERSION or not isinstance(rooms, list)
+                or len(rooms) > 2000 or len(set(rooms)) != len(rooms)
+                or any(type(r) is not int or r not in roster for r in rooms)
+                or not isinstance(levels, list)
+                or any(not isinstance(pair, list) or len(pair) != 2
+                       or type(pair[0]) is not int or pair[0] not in roster
+                       or type(pair[1]) is not int or not 1 <= pair[1] <= 120 for pair in levels)
+                or len({pair[0] for pair in levels}) != len(levels)
+                or (threshold is not None and (type(threshold) is not int or not 1 <= threshold <= 120))
+                or type(plan.get('minimum_rooms')) is not int or not 1 <= plan['minimum_rooms'] <= 2000
+                or type(plan.get('verified_rooms')) is not int or not 0 <= plan['verified_rooms'] <= len(roster)):
+            raise ProgressError('Invalid adaptive like plan')
+        by_level = dict(levels)
+        expected = sorted(by_level, key=lambda room: (by_level[room], room))
+        priority = 25788785
+        expected = ([priority] if priority in roster else []) + [r for r in expected if r != priority]
+        if rooms != expected or (threshold is None and levels) or any(level > threshold for level in by_level.values()):
+            raise ProgressError('Inconsistent adaptive like plan')
+
+    def _reopen_like_rooms(self):
+        # A previously watch/chat-complete room may become eligible for likes.
+        # Preserve its verified counters, but resume its newly required task.
+        for room, after in list(self.done.items()):
+            if room in self.like_targets and not confirmed_task(after.get('like')):
+                self.observed[room] = {'type': 'pending', 'room': room, 'after': after,
+                                       'error': False, 'storage_full': False}
+                del self.done[room]
+
+    def update_like_plan(self, plan):
+        self._validate_like_plan(plan, dict(self.header['targets']))
+        if self.like_plan == plan:
+            return
+        self._append({'type': 'adaptive_like_plan', 'plan': plan})
+        self.like_plan = plan
+        self.like_targets = list(plan['rooms'])
+        self._reopen_like_rooms()
+
+    def _validate_like_result(self, row):
+        if (self.last_like_attempt != (row.get('room'), row.get('clicks'), row.get('reserved_total'))
+                or row.get('accepted') is not True
+                or any(value is not None and (not isinstance(value, list) or len(value) != 2
+                        or any(type(n) is not int for n in value) or not 0 <= value[0] <= value[1] <= 100)
+                       for value in (row.get('before'), row.get('after')))
+                or (self.like_results and self.like_results[-1]['reserved_total'] == row['reserved_total'])):
+            raise ProgressError('Invalid like result')
+
+    def record_like_result(self, room, clicks, before, after):
+        row = {'type': 'like_result', 'room': room, 'clicks': clicks,
+               'reserved_total': self.like_reserved_clicks, 'accepted': True,
+               'before': before, 'after': after}
+        self._validate_like_result(row)
+        self._append(row)
+        self.like_results.append(row)
+
+    def like_probe_summary(self):
+        batches = [row for row in self.like_results
+                   if row['reserved_total'] - row['clicks'] >= LIKE_BASE_LIMIT]
+        return {'reserved_clicks': max(0, self.like_reserved_clicks - LIKE_BASE_LIMIT),
+                'accepted_batches': len(batches),
+                'counter_increased_batches': sum(bool(row['before'] and row['after']
+                    and row['before'][1] == row['after'][1] and row['after'][0] > row['before'][0])
+                                                for row in batches)}
+
+    def record_run_summary(self, summary):
+        self._append({'type': 'run_summary', 'summary': summary})
+        self.run_summaries.append(summary)
+
     def reserve_like(self, room, clicks):
         """Count attempts before POST; lost responses never replenish the budget."""
         if self.like_targets is None or room not in self.like_targets:
             return False
         if type(clicks) is not int or not 1 <= clicks <= 300:
             raise ProgressError('Invalid like count')
-        if self.like_reserved_clicks + clicks > 5000:
+        if self.like_reserved_clicks + clicks > self.like_limit:
             return False
         self._append({'type': 'like_attempt', 'room': room, 'clicks': clicks})
         self.like_reserved_clicks += clicks
+        self.last_like_attempt = (room, clicks, self.like_reserved_clicks)
         return True
 
     def _remember_tasks(self, room, after):

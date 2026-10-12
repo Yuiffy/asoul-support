@@ -165,7 +165,7 @@ class DailyProgressTests(unittest.TestCase):
         self.assertEqual(metadata['daily_completed_rooms'], 3)
         self.assertEqual(metadata['daily_task_completed_rooms'], {k:3 for k in FULL})
 
-    def test_second_queue_run_never_refetches_roster_or_completed_rooms(self):
+    def test_second_queue_run_refreshes_levels_but_never_rechecks_completed_tasks(self):
         state = self.create()
         state.set_like_plan([cloud.SUI_ROOM,1,2])
         state.record(cloud.SUI_ROOM, {'after': FULL}, DAY)
@@ -177,7 +177,7 @@ class DailyProgressTests(unittest.TestCase):
         client.tasks.return_value={'task_info':[{'jump_type':k,'sub_title':'每日上限 10/10'} for k in FULL]}
         with patch('index.Bili', return_value=client), patch('index.today',return_value=DAY):
             metadata, rows = cloud.run_account_queue(ACCOUNT, DAY, time.monotonic()+60, state.ledger, {})
-        client.medal_rooms.assert_not_called()
+        client.medal_rooms.assert_called_once()
         client.tasks.assert_called_once_with(22)
         self.assertEqual([r['room'] for r in rows], [2])
         self.assertEqual(metadata['cached_completed_rooms'], 2)
@@ -201,6 +201,8 @@ class DailyProgressTests(unittest.TestCase):
     def test_checkpoint_failure_stops_further_rooms_and_is_not_reported_as_bili_risk(self):
         state = self.create()
         state.set_like_plan([cloud.SUI_ROOM,1,2])
+        from room_priority import adaptive_like_plan
+        state.update_like_plan(adaptive_like_plan(state.header['targets'], {}))
         state.ledger.append_progress = Mock(side_effect=TimeoutError())
         client = Mock(uid=123, watch_seconds=0)
         client.gate = cloud.AccountGate()

@@ -7,6 +7,7 @@ import urllib.parse
 import urllib.request
 from run_schedule import INTERVAL_SECONDS
 from daily_progress import confirmed_complete, confirmed_task
+from room_priority import LIKE_BASE_LIMIT, LIKE_PROBE_LIMIT
 
 LOG = logging.getLogger(__name__)
 
@@ -89,8 +90,14 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         if cumulative is not None:
             lines.append(f'今日累计单项已满：点赞{cumulative.get("like",0)}间；弹幕{cumulative.get("sendDanmu",0)}间；观看{cumulative.get("watchLive",0)}间')
         if 'like_target_rooms' in identity:
-            lines.append(f'点赞范围：优先房间＋最低等级最多15间，共{len(identity["like_target_rooms"])}间；名单当天固定，仅开播执行')
-            lines.append(f'新策略今日已预约点赞{identity.get("like_reserved_clicks",0)}/5000次（含失败或不确定请求，旧版本历史不计入）')
+            threshold = identity.get('like_level_threshold')
+            label = f'≤{threshold}级' if threshold is not None else '等级未知，仅优先房间'
+            lines.append(f'点赞范围：全部牌子最低至少50间确定门槛{label}，同级一起纳入；共{len(identity["like_target_rooms"])}间，仅开播执行')
+            limit = identity.get('like_attempted_click_limit', LIKE_PROBE_LIMIT)
+            lines.append(f'今日点赞预约{identity.get("like_reserved_clicks",0)}/{limit}次；{LIKE_BASE_LIMIT}以上为实验，非官方额度（含失败/不确定请求）')
+            probe = identity.get('like_probe') or {}
+            if probe.get('reserved_clicks'):
+                lines.append(f'超5000实验：预约{probe["reserved_clicks"]}次；完整实验批接受{probe.get("accepted_batches",0)}批，计数增长{probe.get("counter_increased_batches",0)}批（不等于额度已验证）')
         if any('actions' in row for row in rows):
             counts = {kind: sum(row.get('actions',{}).get(kind,{}).get('accepted',0)
                                for row in rows) for kind in ('like','sendDanmu')}
@@ -157,7 +164,29 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
     completion = ('策略任务完成：名单内需观看、弹幕、点赞满；名单外仅需观看、弹幕满；付费目标另需灯牌满。'
                   if any('like_target_rooms' in identity for identity in identities) else '“累计完成”须三项均满；')
     lines += ['', completion + '单项累计按当天接口确认去重，未知/仅点亮不计入。开播期间不发弹幕，未播不观看/点赞。', '每2小时续跑当天剩余队列；每轮最多110分钟，单实例单请求运行；已完成当日不重查，跨天重置。' + scope]
-    return [(f'{day}-round-{round_id}', '\n'.join(lines))]
+    chunks = notice_chunks('\n'.join(lines))
+    key = f'{day}-round-{round_id}'
+    return [(key if i == 0 else key + f'-part-{i+1}', chunk) for i, chunk in enumerate(chunks)]
+
+
+def notice_chunks(text, limit=2000):
+    """Keep both account summaries; never silently truncate the second account."""
+    chunks, current = [], ''
+    for line in text.splitlines(keepends=True):
+        while len(line.encode('utf-8')) > limit:
+            if current:
+                chunks.append(current.rstrip())
+                current = ''
+            part = line.encode('utf-8')[:limit].decode('utf-8', errors='ignore')
+            chunks.append(part)
+            line = line[len(part):]
+        if len((current + line).encode('utf-8')) > limit:
+            chunks.append(current.rstrip())
+            current = ''
+        current += line
+    if current:
+        chunks.append(current.rstrip())
+    return chunks
 
 
 def report(settings, ledger, day, identities, results, round_id=None):

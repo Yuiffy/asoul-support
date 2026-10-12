@@ -32,7 +32,7 @@ class PacingTests(unittest.TestCase):
         audit={}
         cloud.free_actions(client,1,11,data,cloud.today(),time.monotonic()+60,10,audit)
         self.assertEqual(client.like.call_count,5)
-        self.assertEqual(audit['like'],{'accepted':5,'stop':'no_confirmed_progress'})
+        self.assertEqual(audit['like'],{'accepted':5,'accepted_clicks':150,'stop':'no_confirmed_progress'})
         cloud.free_actions(client,1,11,data,cloud.today(),time.monotonic()+60,1,audit)
         self.assertEqual(client.like.call_count,5)
 

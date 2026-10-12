@@ -112,6 +112,7 @@ class RelightTests(unittest.TestCase):
         c.live_statuses.return_value={1:1}
         c.medal_rooms.return_value={1:11}
         c.medal_levels={1:1}
+        c.like.side_effect=lambda room, uid, count: c.like_budget(room,count)
         empty={'task_info':[],'reach_free_intimacy_limit':True}
         c.tasks.side_effect=lambda uid: empty if uid==cloud.SUI_UID else (lit() if c.like.called else unlit())
         with patch('index.Bili',return_value=c),patch('index.maybe_gift',return_value='already_done'),patch('index.queue_watch',return_value=(lit(),60)):
@@ -126,7 +127,7 @@ class RelightTests(unittest.TestCase):
         self.assertIn('免费日任务已满0间',message)
 
     def test_progress_diagnose_distinguishes_unknown_schema_from_partial_daily_tasks(self,_):
-        state=Mock(header={'targets':[]},done={},observed={
+        state=Mock(header={'targets':[]},done={},like_results=[],run_summaries=[],observed={
             1:{'after':{'watchLive':None,'sendDanmu':None,'like':None},'storage_full':False},
             2:{'after':{'watchLive':[0,10],'sendDanmu':[10,10],'like':[0,10]},'storage_full':True}})
         state.remaining.return_value=[(1,11),(2,22)]

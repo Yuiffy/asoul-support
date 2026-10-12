@@ -142,7 +142,7 @@ class LikePolicyTests(unittest.TestCase):
         self.assertEqual(client.like.call_count,5)
         self.assertEqual(audit['like']['stop'],'planned_batches_sent')
 
-    def test_queue_restores_fixed_plan_without_refetching_or_liking_other_rooms(self):
+    def test_queue_upgrades_fixed_plan_and_prioritizes_verified_low_levels(self):
         state = self.state()
         state.set_like_plan([cloud.SUI_ROOM,2])
         client = Mock(uid=123,watch_seconds=0)
@@ -151,6 +151,7 @@ class LikePolicyTests(unittest.TestCase):
         client.tasks.return_value = {'task_info':[]}
         client.live_statuses.return_value = {1:1,2:1}
         client.room.return_value = {'live_status':0}
+        client.medal_levels = {1:20, 2:1}
         calls = []
         def free(*args, **kwargs):
             calls.append((args[1],kwargs['allow_like']))
@@ -159,5 +160,6 @@ class LikePolicyTests(unittest.TestCase):
                 patch('index.free_actions',side_effect=free):
             meta, rows = cloud.run_account_queue({'uid':123,'cookie':'unused'},cloud.today(),time.monotonic()+60,state.ledger,{})
         client.medal_rooms.assert_not_called()
-        self.assertEqual(calls,[(cloud.SUI_ROOM,True),(2,True),(1,False)])
-        self.assertEqual(meta['like_target_rooms'],[cloud.SUI_ROOM,2])
+        self.assertEqual(calls,[(cloud.SUI_ROOM,True),(2,True),(1,True)])
+        self.assertEqual(meta['like_target_rooms'],[cloud.SUI_ROOM,2,1])
+        self.assertEqual(meta['like_level_threshold'],20)
