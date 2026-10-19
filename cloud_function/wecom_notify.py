@@ -7,7 +7,7 @@ import urllib.parse
 import urllib.request
 from run_schedule import INTERVAL_SECONDS
 from daily_progress import confirmed_complete, confirmed_task
-from room_priority import LIKE_BASE_LIMIT, LIKE_PROBE_LIMIT
+from room_priority import LIKE_BASE_LIMIT, LIKE_PROBE_LIMIT, LIKE_MIN_ROOMS
 
 LOG = logging.getLogger(__name__)
 
@@ -92,9 +92,11 @@ def events(day, identities, results, primary_uid, round_id=None, sui_only=False)
         if 'like_target_rooms' in identity:
             threshold = identity.get('like_level_threshold')
             label = f'≤{threshold}级' if threshold is not None else '等级未知，仅优先房间'
-            lines.append(f'点赞范围：全部牌子最低至少50间确定门槛{label}，同级一起纳入；共{len(identity["like_target_rooms"])}间，仅开播执行')
+            lines.append(f'点赞范围：全部牌子最低至少{LIKE_MIN_ROOMS}间确定门槛{label}，同级一起纳入；共{len(identity["like_target_rooms"])}间，仅开播执行')
             limit = identity.get('like_attempted_click_limit', LIKE_PROBE_LIMIT)
             lines.append(f'今日点赞预约{identity.get("like_reserved_clicks",0)}/{limit}次；{LIKE_BASE_LIMIT}以上为实验，非官方额度（含失败/不确定请求）')
+            if identity.get('like_priority_reserved_clicks'):
+                lines.append(f'优先房间预留{identity["like_priority_reserved_clicks"]}次基础预算，确认当天点赞已满后释放')
             probe = identity.get('like_probe') or {}
             if probe.get('reserved_clicks'):
                 lines.append(f'超5000实验：预约{probe["reserved_clicks"]}次；完整实验批接受{probe.get("accepted_batches",0)}批，计数增长{probe.get("counter_increased_batches",0)}批（不等于额度已验证）')

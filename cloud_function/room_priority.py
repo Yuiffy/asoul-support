@@ -1,9 +1,10 @@
 """Stable room ordering from one per-run live-status snapshot, without IO."""
 
-LIKE_POLICY_VERSION = 'adaptive_lowest50_v2'
-LIKE_MIN_ROOMS = 50
+LIKE_POLICY_VERSION = 'adaptive_lowest100_v3'
+LIKE_MIN_ROOMS = 100
 LIKE_BASE_LIMIT = 5000
 LIKE_PROBE_LIMIT = 6000
+LIKE_PRIORITY_RESERVE = 330  # Ten 30-click rounds plus one possible relight.
 
 
 def adaptive_like_plan(targets, levels, priority_room=25788785, minimum=LIKE_MIN_ROOMS):

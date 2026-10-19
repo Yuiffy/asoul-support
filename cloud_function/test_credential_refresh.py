@@ -1,4 +1,5 @@
 import io
+import gzip
 import json
 import unittest
 from email.message import Message
@@ -207,6 +208,42 @@ class TransportTests(unittest.TestCase):
         opener = Mock()
         opener.open.side_effect = responses
         return cr.RefreshTransport(opener, cloud.AccountGate(), 'test-agent')
+
+    def compressed(self, payload):
+        response = self.response(gzip.compress(payload))
+        response.headers['Content-Encoding'] = 'gzip'
+        return response
+
+    def test_gzip_preparation_page_and_json_are_decoded(self):
+        csrf = '1234567890abcdef1234567890abcdef'
+        transport = self.transport([self.compressed(
+            f'<div id="1-name">{csrf}</div>'.encode())])
+        self.assertEqual(transport.prepare(cr.seed(ACCOUNT), 1234567890123), csrf)
+        transport = self.transport([self.compressed(b'{"code":0,"data":{"refresh":true}}')])
+        self.assertTrue(transport.info(OLD)['refresh'])
+
+    def test_decompressed_response_limit_and_bad_gzip_stop_safely(self):
+        for response in (self.compressed(b'x' * (512 * 1024 + 1)),
+                         self.response(b'invalid compressed private-token')):
+            response.headers['Content-Encoding'] = 'gzip'
+            transport = self.transport([response])
+            with self.assertRaises(cr.CredentialError) as exc:
+                transport.info(OLD)
+            self.assertNotIn('private-', str(exc.exception))
+            self.assertEqual(transport.opener.open.call_count, 1)
+
+    def test_failure_identifies_safe_endpoint_and_get_vs_post_uncertainty(self):
+        for url, method, html, label in ((cr.CORRESPOND + 'a' * 256, 'GET', True, 'correspond'),
+                                        (cr.REFRESH, 'POST', False, 'refresh')):
+            transport = self.transport([TimeoutError('private-token')])
+            with self.assertRaises(cr.CredentialError) as exc:
+                transport.request(url, OLD, method, html=html)
+            message = str(exc.exception)
+            self.assertIn(label, message)
+            self.assertIn('TimeoutError', message)
+            self.assertNotIn('a' * 256, message)
+            self.assertNotIn('private-', message)
+            self.assertEqual('outcome may be uncertain' in message, method == 'POST')
 
     @patch('index.time.sleep')
     def test_protocol_crypto_cookies_and_confirmation_use_correct_tokens(self, _):

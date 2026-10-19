@@ -4,7 +4,7 @@ The gift reservation is deliberately separate and is never reset by this cache.
 """
 import hashlib
 import json
-from room_priority import LIKE_POLICY_VERSION, LIKE_BASE_LIMIT, LIKE_PROBE_LIMIT
+from room_priority import LIKE_POLICY_VERSION, LIKE_BASE_LIMIT, LIKE_PROBE_LIMIT, LIKE_PRIORITY_RESERVE
 
 
 class ProgressError(RuntimeError):
@@ -161,10 +161,16 @@ class DailyProgress:
     def like_limit(self):
         return LIKE_PROBE_LIMIT if self.like_plan else LIKE_BASE_LIMIT
 
+    @property
+    def priority_like_reserve(self):
+        priority = 25788785
+        return (LIKE_PRIORITY_RESERVE if self.like_plan and priority in self.like_targets
+                and priority not in self.task_done['like'] else 0)
+
     def _validate_like_plan(self, plan, roster):
         rooms, levels = plan.get('rooms'), plan.get('levels')
         threshold = plan.get('threshold')
-        if (plan.get('version') != LIKE_POLICY_VERSION or not isinstance(rooms, list)
+        if (plan.get('version') not in (LIKE_POLICY_VERSION, 'adaptive_lowest50_v2') or not isinstance(rooms, list)
                 or len(rooms) > 2000 or len(set(rooms)) != len(rooms)
                 or any(type(r) is not int or r not in roster for r in rooms)
                 or not isinstance(levels, list)
@@ -238,6 +244,11 @@ class DailyProgress:
         if type(clicks) is not int or not 1 <= clicks <= 300:
             raise ProgressError('Invalid like count')
         if self.like_reserved_clicks + clicks > self.like_limit:
+            return False
+        # Protect the priority room within the BASE budget. Other rooms must not
+        # consume this reserve via the experimental tail while it is offline.
+        if (room != 25788785 and self.priority_like_reserve
+                and self.like_reserved_clicks + clicks > LIKE_BASE_LIMIT - self.priority_like_reserve):
             return False
         self._append({'type': 'like_attempt', 'room': room, 'clicks': clicks})
         self.like_reserved_clicks += clicks

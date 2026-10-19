@@ -4,10 +4,13 @@ Network and storage adapters are injected. A refresh POST is never retried after
 an uncertain outcome. Only a durably saved new credential may be confirmed.
 """
 import hashlib
+import gzip
 import http.cookies
+import io
 import json
 import re
 import urllib.parse
+import urllib.error
 import urllib.request
 from html.parser import HTMLParser
 
@@ -136,6 +139,8 @@ class RefreshTransport:
         if not allowed:
             raise CredentialError('Unexpected credential endpoint')
         endpoint = urllib.parse.urlsplit(url).path
+        label = ('cookie_info' if url == INFO else 'refresh' if url == REFRESH else
+                 'confirm' if url == CONFIRM else 'correspond')
         headers = {'Cookie': cookie, 'User-Agent': self.user_agent,
                    'Referer': 'https://www.bilibili.com/', 'Origin': 'https://www.bilibili.com'}
         body = None
@@ -149,6 +154,15 @@ class RefreshTransport:
                     raw = response.read(512 * 1024 + 1)
                     if len(raw) > 512 * 1024:
                         raise CredentialError('Credential response exceeds limit')
+                    encoding = (response.headers.get('Content-Encoding') or 'identity').strip().lower()
+                    if encoding == 'gzip':
+                        # Bound the decoded size too; urllib does not decompress responses.
+                        with gzip.GzipFile(fileobj=io.BytesIO(raw)) as compressed:
+                            raw = compressed.read(512 * 1024 + 1)
+                        if len(raw) > 512 * 1024:
+                            raise CredentialError('Credential response exceeds limit')
+                    elif encoding != 'identity':
+                        raise CredentialError(f'Credential response encoding unsupported: endpoint={label}')
                     new = http.cookies.SimpleCookie()
                     for header in response.headers.get_all('Set-Cookie', []):
                         new.load(header)
@@ -162,8 +176,13 @@ class RefreshTransport:
                     return result.get('data') or {}, {k: v.value for k, v in new.items()}
         except CredentialError:
             raise
-        except Exception:
-            raise CredentialError('Credential request failed; outcome may be uncertain') from None
+        except Exception as exc:
+            # Never expose exception text, credential URLs, headers or response bodies.
+            detail = f'endpoint={label}; method={method}; error={type(exc).__name__}'
+            if isinstance(exc, urllib.error.HTTPError):
+                detail += f'; http_status={exc.code}'
+            outcome = 'outcome may be uncertain' if method == 'POST' else 'read-only request failed'
+            raise CredentialError(f'Credential request failed; {detail}; {outcome}') from None
 
     def info(self, cookie):
         return self.request(INFO, cookie)[0]

@@ -15,7 +15,7 @@ class QueueTests(unittest.TestCase):
         client.login.return_value = {'uid':123}
         client.medal_rooms.return_value = {1:11, 2:22}
         client.live_statuses.return_value = {1:0, 2:0}
-        client.room.side_effect = lambda room: {'uid':11 if room==1 else 22, 'live_status':0}
+        client.room.side_effect = lambda room, for_chat=False: {'uid':11 if room==1 else 22, 'live_status':0}
         accepted = {1:0, 2:0}
         def tasks(uid):
             if uid==cloud.SUI_UID:

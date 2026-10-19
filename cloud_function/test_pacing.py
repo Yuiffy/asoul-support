@@ -22,6 +22,15 @@ class Clock:
 
 
 class PacingTests(unittest.TestCase):
+    def checked_room(self, client, lookup):
+        def room(room_id, fresh=False, for_chat=False):
+            data = lookup()
+            if for_chat and data.get('live_status') == 0:
+                client.chat_status = {'room_id':room_id, 'data':data,
+                                      'checked_at':time.monotonic(), 'attempts':0}
+            return data
+        return Mock(side_effect=room)
+
     @patch('index.time.sleep')
     def test_unchanged_counter_ends_after_bounded_remaining_like_batches(self,_):
         client=Mock()
@@ -62,7 +71,7 @@ class PacingTests(unittest.TestCase):
                 accepted.append(clock.now)
             return io.BytesIO(json.dumps({'code':code,'data':{}}).encode())
         client.opener.open = Mock(side_effect=send)
-        client.room = Mock(side_effect=lambda room:{'uid':11,
+        client.room = self.checked_room(client,lambda:{'uid':11,
             'live_status':1 if live_after_wait and clock.now>=1060 else 0})
         def tasks():
             count = 1 if task_full_after_wait and clock.now>=1060 else len(accepted)
@@ -154,7 +163,7 @@ class PacingTests(unittest.TestCase):
         clock = Clock()
         client = cloud.Bili('SESSDATA=example; bili_jct=example',123)
         client.salt = 'test-salt'
-        client.room = Mock(return_value={'live_status':0})
+        client.room = self.checked_room(client,lambda:{'live_status':0})
         sent=[]
         def send(request,**kwargs):
             sent.append((clock.now,request))
@@ -174,7 +183,7 @@ class PacingTests(unittest.TestCase):
         clock = Clock()
         client = cloud.Bili('SESSDATA=example; bili_jct=example',123)
         client.salt = 'test-salt'
-        client.room = Mock(return_value={'uid':11,'live_status':0})
+        client.room = self.checked_room(client,lambda:{'uid':11,'live_status':0})
         sent = []
         def send(request, **kwargs):
             sent.append(clock.now)

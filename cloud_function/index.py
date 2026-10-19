@@ -24,7 +24,7 @@ from wecom_notify import report, send_notice
 from daily_progress import DailyProgress, ProgressError
 from run_schedule import INTERVAL_SECONDS, MAX_RUN_SECONDS, CLOUD_TIMEOUT_SECONDS, reservation_slots
 from room_priority import (prioritize, adaptive_like_plan, LIKE_POLICY_VERSION,
-                           LIKE_MIN_ROOMS, LIKE_BASE_LIMIT, LIKE_PROBE_LIMIT)
+                           LIKE_MIN_ROOMS, LIKE_BASE_LIMIT, LIKE_PROBE_LIMIT, LIKE_PRIORITY_RESERVE)
 from relight_rules import relight_task
 from credential_refresh import CredentialError, EncryptedJournal, RefreshTransport, maintain
 
@@ -40,6 +40,7 @@ LIKE_ENDPOINT = '/xlive/app-ucenter/v1/like_info_v3/like/likeReportV3'
 COOKIE_INFO = 'https://passport.bilibili.com/x/passport-login/web/cookie/info'
 PACING = {'query_seconds': [1.5, 2.0], 'like_seconds': [15, 20],
           'danmaku_seconds': [6, 8], 'heartbeat': 'server_interval',
+          'danmaku_status_max_age_seconds': 30, 'danmaku_status_batch_messages': 5,
           'danmaku_frequency_backoff_seconds': [60, 120],
           'priority': 'sui_then_live_then_offline', 'watch_workers_per_account': 8,
           'watch_session_seconds': 960}
@@ -259,6 +260,7 @@ class Bili:
         self.medal_levels = {}
         self.like_budget = None
         self.like_observer = None
+        self.chat_status = None
         self.opener = urllib.request.build_opener(NoRedirect())
 
     def request(self, url, params=None, method='GET', signed=False, form=None):
@@ -273,18 +275,28 @@ class Bili:
         headers = {'User-Agent': UA, 'Cookie': self.cookie,
                    'Referer': f'https://live.bilibili.com/{SUI_ROOM}',
                    'Origin': 'https://live.bilibili.com'}
+        if endpoint == '/room/v1/Room/get_info' and '_ts' in params:
+            headers.update({'Cache-Control': 'no-cache, no-store', 'Pragma': 'no-cache'})
         # Wait for the account's danmaku cooldown outside the network lock so
         # a scheduled heartbeat is not blocked behind a chat cooldown.
         if endpoint == '/msg/send':
             self.gate.wait_action(endpoint)
-            # A room may go live while this account waits in the queue/cooldown.
-            # Require an explicit offline status immediately before any chat POST.
-            room = self.room(int((form or {})['roomid']))
-            if room.get('live_status') != 0:
+            # Reuse one room's offline check for at most five sends / 30seconds.
+            room = self.room(int((form or {})['roomid']), for_chat=True)
+            chat_check = self.chat_status
+            if (type(room.get('live_status')) is not int or room['live_status'] != 0
+                    or not chat_check or chat_check['data'] is not room):
                 return {'_skipped_not_offline': True}
         # No automatic POST retries: a timeout may mean the server accepted it.
         try:
             with self.gate.slot(endpoint):
+                # Watch workers may have occupied the shared gate after the GET.
+                # Never use an old offline result after waiting for a POST slot.
+                if endpoint == '/msg/send' and (chat_check is not self.chat_status
+                        or time.monotonic() - chat_check['checked_at'] >= PACING['danmaku_status_max_age_seconds']):
+                    self.chat_status = None
+                    LOG.info('Danmaku skipped room=%s reason=stale_live_status', form['roomid'])
+                    return {'_skipped_not_offline': True}
                 # Sign after all pacing waits; never submit a pre-wait timestamp.
                 if signed:
                     if not self.salt:
@@ -301,10 +313,14 @@ class Bili:
                     body = urllib.parse.urlencode(form).encode()
                     headers['Content-Type'] = 'application/x-www-form-urlencoded'
                 req = urllib.request.Request(target, data=body, headers=headers, method=method)
+                if endpoint == '/msg/send' and self.chat_status:
+                    self.chat_status['attempts'] += 1
                 with self.opener.open(req, timeout=15) as response:
                     result = json.load(response)
                     challenge_header = bool(getattr(response, 'headers', {}).get('x-bili-gaia-vvoucher'))
                 if result.get('code') != 0:
+                    if endpoint == '/msg/send':
+                        self.chat_status = None
                     if self.gate.diagnostics:
                         response_data = result.get('data')
                         self.gate.last_rejection = {
@@ -321,8 +337,12 @@ class Bili:
                         }
                     self.gate.rejected(result.get('code'), endpoint)
         except TaskError:
+            if endpoint == '/msg/send':
+                self.chat_status = None
             raise
         except Exception as exc:
+            if endpoint == '/msg/send':
+                self.chat_status = None
             raise TaskError(endpoint + ': Bilibili transport failure: ' + type(exc).__name__) from None
         if result.get('code') != 0:
             message = str(result.get('message') or result.get('msg') or 'no message')
@@ -332,6 +352,8 @@ class Bili:
             message = re.sub(r'https?://\S+|[A-Za-z0-9_%-]{24,}', '[redacted]', message)[:140]
             raise ApiError(result.get('code'), endpoint, message)
         if result.get('msg') in ('k', 'f'):
+            if endpoint == '/msg/send':
+                self.chat_status = None
             raise TaskError('Danmaku filtered; stopped')
         return result.get('data') or {}
 
@@ -354,8 +376,27 @@ class Bili:
             raise TaskError('Cookie refresh recommendation is unavailable')
         return {'refresh_required': data['refresh']}
 
-    def room(self, room_id):
-        return self.request(LIVE + '/room/v1/Room/get_info', {'room_id': room_id})
+    def room(self, room_id, fresh=False, for_chat=False):
+        if for_chat:
+            cached = self.chat_status
+            if (cached and cached['room_id'] == room_id
+                    and cached['attempts'] < PACING['danmaku_status_batch_messages']
+                    and time.monotonic() - cached['checked_at'] < PACING['danmaku_status_max_age_seconds']):
+                return cached['data']
+            self.chat_status = None
+            data = self.room(room_id, fresh=True)
+            if type(data.get('live_status')) is int and data['live_status'] == 0:
+                self.chat_status = {'room_id': room_id, 'data': data,
+                                    'checked_at': time.monotonic(), 'attempts': 0}
+            return data
+        params = {'room_id': room_id}
+        if fresh:
+            params['_ts'] = time.time_ns()
+        data = self.request(LIVE + '/room/v1/Room/get_info', params)
+        if (self.chat_status and self.chat_status['room_id'] == room_id
+                and (type(data.get('live_status')) is not int or data['live_status'] != 0)):
+            self.chat_status = None
+        return data
 
     def tasks(self, uid):
         return self.request(LIVE + '/xlive/app-ucenter/v1/fansMedal/GetActivatedMedalInfo',
@@ -623,7 +664,7 @@ def free_actions(client, room_id, uid, data, day, deadline, max_rounds, audit=No
                     or (not relight_count and daily_rounds >= (like_round_limit if kind == 'like' else max_rounds))):
                 outcome['stop'] = 'planned_batches_sent' if kind == 'like' and not relight_count else 'round_budget'
                 break
-            room = client.room(room_id)
+            room = client.room(room_id, for_chat=True) if kind == 'sendDanmu' else client.room(room_id)
             live = room.get('live_status') == 1
             if int(room.get('uid', 0)) != uid:
                 raise TaskError('Room owner mismatch')
@@ -949,6 +990,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                         daily_task_completed_rooms=daily.task_counts(),
                         like_reserved_clicks=daily.like_reserved_clicks,
                         like_attempted_click_limit=daily.like_limit,
+                        like_priority_reserved_clicks=daily.priority_like_reserve,
                         like_probe=daily.like_probe_summary())
         stops = {}
         for row in rows.values():
@@ -961,6 +1003,7 @@ def run_account_queue(account, day, deadline, ledger, settings):
                 'status': metadata.get('status', 'finished'), 'reason': metadata.get('reason'),
                 'risk_code': gate.risk_code, 'like_stops': stops,
                 'like_reserved_clicks': daily.like_reserved_clicks,
+                'like_priority_reserved_clicks': daily.priority_like_reserve,
                 'task_counts': daily.task_counts()})
         except ProgressError as exc:
             metadata.update(status='error', reason=str(exc))
@@ -1105,6 +1148,7 @@ def handler(event, context):
                            'like_plan': state.like_plan,
                            'like_reserved_clicks': state.like_reserved_clicks,
                            'like_attempted_click_limit': state.like_limit,
+                           'like_priority_reserved_clicks': state.priority_like_reserve,
                            'like_probe': state.like_probe_summary(),
                            'recent_like_batches': state.like_results[-20:],
                            'recent_run_summaries': state.run_summaries[-12:]})
@@ -1141,6 +1185,7 @@ def handler(event, context):
                 'like_policy': {'version': LIKE_POLICY_VERSION, 'minimum_threshold_rooms': LIKE_MIN_ROOMS,
                                 'batch': 'task_title_count', 'base_attempted_click_limit': LIKE_BASE_LIMIT,
                                 'daily_attempted_click_limit': LIKE_PROBE_LIMIT,
+                                'priority_base_click_reserve_until_confirmed_full': LIKE_PRIORITY_RESERVE,
                                 'selection': 'all_held_medals_threshold_including_ties',
                                 'execution': 'live_only_priority_then_lowest_level',
                                 'probe': 'unfinished_tasks_only_above_5000',

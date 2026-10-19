@@ -55,6 +55,17 @@ after all pacing waits, not before. These intervals are not an official guarante
 against platform risk checks. No deliberate live risk-reproduction POSTs are used
 as deployment validation.
 
+Each room starts with a fresh offline-status GET using a unique query parameter
+and no-cache headers. Reuse that result for at most **5 attempted sends or
+30seconds**, whichever comes first; switching rooms also forces a fresh check.
+The outer task loop and final POST guard share this check. Once the POST acquires
+the shared request slot, a response aged30seconds is discarded without sending.
+Live, loop, unknown/malformed status and failed lookups block sending; rejection
+or uncertain transport clears the cached status. Health pacing exposes
+`danmaku_status_batch_messages=5` and `danmaku_status_max_age_seconds=30`.
+A room going live inside that window can still receive some of the current group,
+and Bilibili status propagation adds uncertainty; this is not a real-time guarantee.
+
 After each accepted danmaku, wait3seconds before checking task progress; the
 account-wide6–8second send cooldown remains active across rooms. The final offline
 GET and query pacing add time to the actual POST-to-POST interval. Likes retain
@@ -196,6 +207,12 @@ Replacing the configured seed pair creates a new journal namespace. Keep the key
 stable; changing it cannot decrypt existing state. Export recovery credentials only
 through private authorized channels; this adapter has no credential-export mode.
 
+Credential responses support identity and gzip encoding, with a 512KB limit on
+both compressed and decoded content. Transport failures report the endpoint label,
+method and exception type (plus HTTP status when available), never credential URLs,
+tokens or provider response bodies. A failed read-only preparation is distinct
+from an uncertain refresh POST and does not by itself mean login has expired.
+
 `{"mode":"credential_status"}` is read-only: it loads the newest encrypted
 credential, checks login and refresh recommendation, and returns only status and
 Cookie/token presence flags. It never initializes OBS objects. A missing-object
@@ -323,21 +340,30 @@ remain unchanged, preserving existing reservations.
 
 ## Adaptive low-medal like selection
 
-Health exposes `like_policy.version=adaptive_lowest50_v2`. Each run refreshes
-verified medal levels for the account's daily roster. The level of the 50th
+Health exposes `like_policy.version=adaptive_lowest100_v3`. Each run refreshes
+verified medal levels for the account's daily roster. The level of the 100th
 lowest medal defines threshold x; every medal at or below x is eligible, including
-ties. With fewer than 50 verified medals, use all of them. **All held medals**
+ties. With fewer than 100 verified medals, use all of them. **All held medals**
 participate, including offline rooms; unknown levels are excluded. The fixed
 priority room is always eligible regardless of level. This threshold may leave
 unused budget when low-level rooms never go live; it is not widened by live status.
 
-Persist the updated plan and level evidence without resetting today's attempts,
+The former50-room plan remains readable; upgrading widens selection while keeping
+the same daily journal. Persist the updated plan and level evidence without resetting today's attempts,
 task history or gift reservations. Previously completed watch/chat-only rooms
 are reopened if newly eligible for an unfinished like task. Priority room runs
 first, then selected live rooms ordered by level and room ID, other live rooms,
 and offline rooms. Every action still verifies current room status.
 Rooms outside the like plan receive no like POST, including relighting likes,
 but retain offline danmaku and live watch tasks.
+
+Until that account has verified the priority room's daily like task is full,
+reserve330 clicks inside the5000 base attempt budget (ten30-click rounds plus
+one possible relight). Other rooms stop at4670 total attempts while this reserve
+is held, including experimental attempts; merely accepting priority likes does
+not release it. A verified full counter releases the reserve, also after restart.
+Each account reserves independently. This protects the program's own budget;
+manual/other-tool clicks and platform credit limits remain outside its control.
 
 Likes use the task title's round count (normally 30) per POST, with 15–20 second
 account-wide cooldowns. An unchanged but known counter can finish only the
